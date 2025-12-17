@@ -1,0 +1,190 @@
+# UNIFIED Trading System Configuration
+
+# Data Configuration
+data:
+  source: "kaggle"
+  dataset: "debashis74017/nifty-50-minute-data"
+  raw_path: "data/raw"
+  processed_path: "data/processed"
+  train_start: null  # Will be set after data exploration
+  train_end: null
+  val_start: null
+  val_end: null
+  test_start: null
+  test_end: null
+  sequence_length: 50  # Number of timesteps in lookback window
+  prediction_horizon: 5  # Forward-looking prediction window
+  
+# Feature Engineering
+features:
+  ohlcv: true
+  technical_indicators:
+    momentum: ["rsi", "macd", "stoch", "cci", "roc"]
+    trend: ["sma", "ema", "adx", "aroon", "psar"]
+    volatility: ["bbands", "atr", "kc", "dc"]
+    volume: ["obv", "vwap", "cmf", "mfi", "ad"]
+  num_features: 45  # Target number of engineered features
+  
+# World Model Configuration
+world_model:
+  conv_channels: [64, 128]
+  conv_kernel_sizes: [5, 3]
+  lstm_hidden_size: 256
+  lstm_num_layers: 2
+  bidirectional: true
+  dropout: 0.4
+  
+  # Multi-head outputs
+  price_head_dim: 2  # (return_mean, return_std)
+  volume_head_dim: 2  # (volume_mean, volume_std)
+  num_regimes: 4  # bull, bear, crash, sideways
+  
+  # Training
+  learning_rate: 0.0003
+  batch_size: 2048 #128
+  num_epochs: 100
+  early_stopping_patience: 15
+  
+# Domain Randomization
+domain_randomization:
+  enabled: true
+  curriculum: true  # Gradually increase randomization
+  initial_range_multiplier: 1.0
+  final_range_multiplier: 2.0
+  curriculum_steps: 10000
+  
+  parameters:
+    volatility:
+      real_min: 0.10
+      real_max: 0.60
+      random_min: 0.05
+      random_max: 0.80
+    spread_bps:
+      real_min: 1
+      real_max: 50
+      random_min: 0.5
+      random_max: 100
+    market_impact:
+      real_min: 0.01
+      real_max: 0.1
+      random_min: 0.001
+      random_max: 0.2
+    slippage_bps:
+      real_min: 1
+      real_max: 20
+      random_min: 0.5
+      random_max: 40
+
+# Trading Environment
+environment:
+  initial_capital: 100000  # 10 lakh INR
+  commission_bps: 5  # 0.05% per trade
+  max_position: 1.0  # Maximum position size (fraction of portfolio)
+  min_position: -1.0  # Minimum position size (allow shorting)
+  position_granularity: 0.1  # Position size discrete steps
+  
+  # Transaction costs
+  spread_model: "randomized"  # or "fixed"
+  slippage_model: "sqrt"  # sqrt(order_size) * volatility
+  market_impact_model: "linear"  # linear in order_size
+  
+# Meta-RL Policy
+# Meta-RL Policy
+policy:
+  rnn_hidden_size: 256
+  hidden_sizes: [64, 64] # MLP layers before/after RNN
+  action_dim: 1  # Continuous position [-1, 1]
+  
+  # Multi-head outputs
+  risk_head_dim: 3  # (drawdown, volatility, VaR)
+  regime_head_dim: 4
+  
+  # Training (PPO)
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 2048
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  
+# Meta-Learning (MAML)
+meta_learning:
+  enabled: true
+  inner_lr: 0.01
+  outer_lr: 0.001
+  inner_steps: 5
+  tasks_per_batch: 4
+  support_episodes: 10
+  query_episodes: 5
+  
+  # Task sampling
+  regime_types: ["bull", "bear", "crash", "sideways"]
+  min_task_length: 20  # days
+  max_task_length: 60  # days
+
+# Reward Function
+reward:
+  pnl_weight: 1.0
+  volatility_penalty: 0.1  # lambda in paper
+  drawdown_penalty: 0.5  # mu in paper
+  constraint_penalty: 10.0  # Penalty for violating position limits
+  
+  # Risk-adjusted metrics
+  sharpe_target: 2.0
+  max_drawdown_threshold: 0.20  # 20%
+  
+# Training Pipeline
+training:
+  # Stage 1: World Model Pre-training
+  stage1_epochs: 15
+  
+  # Stage 2: Offline Meta-RL
+  stage1_epochs: 15
+  
+  # Stage 2: Offline Meta-RL
+  episode_length: 100
+  stage2_timesteps: 1000  #000
+  stage2_synthetic_ratio: 0.8  # 80% synthetic, 20% real
+  
+  # Stage 3: Online Fine-tuning
+  stage3_timesteps: 500000
+  
+  # Stage 4: Risk-aware Multi-task
+  stage4_timesteps: 300000
+  
+  # Stage 5: Continual Domain Randomization
+  stage5_timesteps: 200000
+  
+  # General
+  save_frequency: 10000  # Save checkpoint every N steps
+  eval_frequency: 5000  # Evaluate every N steps
+  log_frequency: 100
+  
+# Walk-Forward Validation
+validation:
+  num_windows: 6
+  train_window_days: 365  # 1 year training
+  test_window_days: 90  # 3 months testing
+  overlap: false  # Non-overlapping windows
+  
+  # Metrics
+  metrics: ["sharpe", "sortino", "calmar", "max_drawdown", "total_return"]
+  bonferroni_correction: true
+  
+# Computational
+compute:
+  device: "auto"  # auto, cpu, cuda
+  num_workers: 4
+  seed: 42
+  deterministic: false  # Set to true for reproducibility
+  
+# Logging
+logging:
+  tensorboard: true
+  log_dir: "logs"
+  checkpoint_dir: "models/checkpoints"
+  verbosity: "INFO"
