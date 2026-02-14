@@ -111,43 +111,47 @@ def main():
     if args.stage <= 2:
         logger.info("\n=== STAGE 2: Offline Meta-RL on Synthetic Data ===")
         
+        from training.meta_trainer import MetaTrainer
+        
         # Domain Randomizer
         dr = DomainRandomizer(config['domain_randomization'], device=device)
         
-        # Create Synthetic Environment
-        env = SyntheticTradingEnv(
+        # Task environment factory
+        def env_factory(task_config):
+             return SyntheticTradingEnv(
+                world_model=world_model,
+                domain_randomizer=dr,
+                initial_state_sampler=initial_state_sampler,
+                episode_length=config['training']['episode_length'],
+                device=device
+            )
+
+        # Initialize base policy core
+        real_env = TradingEnv(
+            dataset=dataset,
             world_model=world_model,
-            domain_randomizer=dr,
-            initial_state_sampler=initial_state_sampler,
-            episode_length=config['training']['episode_length'],
+            window_size=config['data']['sequence_length'],
+            device=device
+        )
+        policy = MetaPolicy(real_env, config, device=device)
+        
+        # Initialize Meta-Trainer
+        trainer = MetaTrainer(
+            policy=policy.model.policy,
+            env_factory=env_factory,
+            config=config,
             device=device
         )
         
-        # Initialize Policy
-        # Use TensorBoard log if enabled
-        tb_log = str(project_root / config['logging']['log_dir'] / 'meta_rl/stage2') if config['logging'].get('tensorboard') else None
-        
-        policy = MetaPolicy(env, config, device=device, tensorboard_log=tb_log)
-        
-        # Callbacks
-        checkpoint_callback = CheckpointCallback(
-            save_freq=config['training'].get('save_frequency', 5000),
-            save_path=str(project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage2_checkpoints'),
-            name_prefix='stage2_model'
-        )
-        
         # Train
-        logger.info(f"Training policy on synthetic data for {config['training']['stage2_timesteps']} steps...")
-        policy.learn(
-            total_timesteps=config['training']['stage2_timesteps'],
-            callback=checkpoint_callback
-        )
+        logger.info(f"Training Meta-RL policy for {config['training']['stage2_timesteps']} meta-iterations...")
+        trainer.run_stage2(total_iterations=config['training']['stage2_timesteps'])
         
         # Save Stage 2 Checkpoint
         save_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage2_policy.zip'
         save_path.parent.mkdir(parents=True, exist_ok=True)
         policy.save(str(save_path))
-        logger.info(f"Stage 2 (Synthetic) complete. Saved to {save_path}")
+        logger.info(f"Stage 2 (Meta-RL) complete. Saved to {save_path}")
 
     # STAGE 3: Online Fine-tuning on Real Data
     if args.stage <= 3:

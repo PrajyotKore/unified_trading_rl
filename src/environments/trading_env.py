@@ -78,8 +78,8 @@ class TradingEnv(gym.Env):
         
         # Risk Configuration
         self.risk_config = risk_config or {}
-        self.vol_penalty = self.risk_config.get('volatility_penalty', 0.0)
-        self.dd_penalty = self.risk_config.get('drawdown_penalty', 0.0)
+        self.vol_penalty = self.risk_config.get('volatility_penalty', 0.1) # λ in paper
+        self.dd_penalty = self.risk_config.get('drawdown_penalty', 0.5)   # μ in paper
         
         # Action space: Target position [-1, 1]
         # -1 = Full Short, 0 = Cash, 1 = Full Long
@@ -207,34 +207,26 @@ class TradingEnv(gym.Env):
             if len(self.return_history) > 20: self.return_history.pop(0)
             volatility = np.std(self.return_history) if len(self.return_history) > 5 else 0.0
             
-            # Differential Sharpe Ratio (DSR) Optimization
-            eta = 1/1000  # Learning rate for running stats
+            # Composite Reward Function (Section 1.4)
+            # R_t = r_pnl - λ * σ_pred - μ * max_dd_pred - penalty_constraint
             
-            # 1. Update A (First moment: Mean return)
-            if not hasattr(self, 'running_A'): self.running_A = 0.0
-            delta_A = gross_return - self.running_A
-            self.running_A += eta * delta_A
-            
-            # 2. Update B (Second moment: Mean squared return)
-            if not hasattr(self, 'running_B'): self.running_B = 1e-6
-            delta_B = (gross_return ** 2) - self.running_B
-            self.running_B += eta * delta_B
-            
-            # 3. Compute DSR (Mathematical Formula from Moody & Saffell)
-            # Variance must be positive for power 1.5 (which is sqrt^3)
-            variance = max(self.running_B - (self.running_A ** 2), 1e-9)
-            denominator = variance ** 1.5
-            
-            if denominator > 1e-12:
-                dsr = (self.running_B * delta_A - 0.5 * self.running_A * delta_B) / denominator
-            else:
-                dsr = 0.0
-                
-            reward = dsr * self.reward_scaling
-            
-            # Apply penalties (Standard reinforcement)
+            # For simplicity in TradingEnv, we use realized metrics as proxies for pred if WM not predicting risk yet
+            reward = gross_return
             reward -= self.vol_penalty * volatility
             reward -= self.dd_penalty * drawdown
+            
+            # soft constraints (Section 1.4)
+            penalty = 0.0
+            if volatility > 0.15: # σ_target = 15% (daily/rolling)
+                penalty += 1.0 * (volatility - 0.15)
+            if drawdown > 0.20: # dd_target = 20%
+                penalty += 2.0 * (drawdown - 0.20)
+            if drawdown > 0.25: # Hard stop penalty
+                penalty += 10.0
+                terminated = True
+                
+            reward -= penalty
+            reward *= self.reward_scaling
             
             # Final Reward Stability: Clip reward to avoid PPO explosion
             reward = np.clip(reward, -10.0, 10.0)

@@ -52,6 +52,10 @@ class DomainRandomizer:
         self.initial_range_mult = config.get('initial_range_multiplier', 1.0)
         self.final_range_mult = config.get('final_range_multiplier', 2.0)
         
+        # 4-Phase Curriculum Logic (Section 3.2)
+        # We'll use get_randomization_multiplier to scale the config ranges
+        # based on current training epoch/step
+        
         # Extract parameter ranges
         self.params = config.get('parameters', {})
         
@@ -65,9 +69,24 @@ class DomainRandomizer:
         return min(1.0, self.current_step / self.curriculum_steps)
     
     def get_randomization_multiplier(self) -> float:
-        """Get current randomization range multiplier."""
+        """
+        Get current randomization range multiplier based on 4-phase curriculum.
+        Section 3.2: Easy (0-25%), Medium (25-50%), Hard (50-75%), Extreme (75-100%)
+        """
         progress = self.get_curriculum_progress()
-        return self.initial_range_mult + progress * (self.final_range_mult - self.initial_range_mult)
+        
+        if progress < 0.25:
+             # EASY: Narrow ranges
+             return 1.0
+        elif progress < 0.50:
+             # MEDIUM
+             return 1.33
+        elif progress < 0.75:
+             # HARD
+             return 1.66
+        else:
+             # EXTREME
+             return self.final_range_mult
     
     def randomize_volatility(self, base_vol: torch.Tensor, batch_size: int = 1) -> torch.Tensor:
         """

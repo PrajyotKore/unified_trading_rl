@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2026.1.4)  14 FEB 2026 18:22
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2026.1.4)  14 FEB 2026 22:04
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -431,8 +431,8 @@ Package natbib Warning: Citation `cartea2021' on page 1 undefined on input line 
 Package natbib Warning: Citation `harvey2016' on page 1 undefined on input line 45.
 
 
-Overfull \hbox (23.31972pt too wide) detected at line 52
-[][][][][] \OT1/cmr/m/n/10.95 = [] + [][][] + [] + [] + []
+Overfull \hbox (66.86177pt too wide) detected at line 52
+[][][][][] \OT1/cmr/m/n/10.95 = [] + [] + [] + [] + []
  []
 
 
@@ -446,6 +446,10 @@ Package natbib Warning: Citation `dr4drl2024' on page 1 undefined on input line 
 [1
 
 {/usr/local/texlive/2025/texmf-var/fonts/map/pdftex/updmap/pdftex.map}{/usr/local/texlive/2025/texmf-dist/fonts/enc/dvips/cm-super/cm-super-t1.enc}]
+Overfull \hbox (6.42848pt too wide) in paragraph at lines 58--59
+[]\T1/cmr/bx/n/10.95 Meta-RL for Non-Stationarity\T1/cmr/m/n/10.95 : We uti-lize \T1/cmr/bx/n/10.95 Model-Agnostic Meta-Learning (MAML)
+ []
+
 
 Package natbib Warning: Citation `li2025silver' on page 2 undefined on input line 60.
 
@@ -459,25 +463,25 @@ LaTeX Warning: `h' float specifier changed to `ht'.
 pdfTeX warning (ext4): destination with the same identifier (name{table.1}) has been already used, duplicate ignored
 <argument> ...shipout:D \box_use:N \l_shipout_box 
                                                   \__shipout_drop_firstpage_...
-l.126 \begin{equation}
+l.130 \begin{equation}
                       ]
 
-Package natbib Warning: Citation `deprado2018advances' on page 3 undefined on input line 157.
+Package natbib Warning: Citation `deprado2018advances' on page 3 undefined on input line 161.
 
 
 
 [3]
 
-LaTeX Warning: File `regime_adaptation.pdf' not found on input line 187.
+LaTeX Warning: File `regime_adaptation.pdf' not found on input line 191.
 
 
-/Users/prajyotkore/Prajyot/unified_trading_rl/Paper/PAPER.tex:187: Package pdftex.def Error: File `regime_adaptation.pdf' not found: using draft setting.
+/Users/prajyotkore/Prajyot/unified_trading_rl/Paper/PAPER.tex:191: Package pdftex.def Error: File `regime_adaptation.pdf' not found: using draft setting.
 
 See the pdftex.def package documentation for explanation.
 Type  H <return>  for immediate help.
  ...                                              
                                                   
-l.187 ...dth=0.8\textwidth]{regime_adaptation.pdf}
+l.191 ...dth=0.8\textwidth]{regime_adaptation.pdf}
                                                   
 Try typing  <return>  to proceed.
 If that doesn't work, type  X <return>  to quit.
@@ -491,12 +495,12 @@ LaTeX Warning: `h' float specifier changed to `ht'.
 pdfTeX warning (ext4): destination with the same identifier (name{table.2}) has been already used, duplicate ignored
 <argument> ...shipout:D \box_use:N \l_shipout_box 
                                                   \__shipout_drop_firstpage_...
-l.226 \section
+l.230 \section
               *{Acknowledgments}
 pdfTeX warning (ext4): destination with the same identifier (name{table.3}) has been already used, duplicate ignored
 <argument> ...shipout:D \box_use:N \l_shipout_box 
                                                   \__shipout_drop_firstpage_...
-l.226 \section
+l.230 \section
               *{Acknowledgments}{/usr/local/texlive/2025/texmf-dist/fonts/enc/dvips/cm-super/cm-super-ts1.enc}]
 No file PAPER.bbl.
 
@@ -508,7 +512,7 @@ Package natbib Warning: There were undefined citations.
 pdfTeX warning (ext4): destination with the same identifier (name{figure.1}) has been already used, duplicate ignored
 <argument> ...shipout:D \box_use:N \l_shipout_box 
                                                   \__shipout_drop_firstpage_...
-l.233 \end{document}
+l.237 \end{document}
                     ] (./PAPER.aux)
  ***********
 LaTeX2e <2024-11-01> patch level 2
@@ -525,21 +529,21 @@ Package rerunfilecheck Warning: File `PAPER.out' has changed.
 
 Package rerunfilecheck Info: Checksums for `PAPER.out':
 (rerunfilecheck)             Before: <no file>
-(rerunfilecheck)             After:  AADB711E534C9C70C08DF366CC99155E;3022.
+(rerunfilecheck)             After:  BAB237180A086561D7F93E0D3B070DF4;2994.
  ) 
 Here is how much of TeX's memory you used:
- 13349 strings out of 473190
- 213812 string characters out of 5715801
- 653227 words of memory out of 5000000
- 36380 multiletter control sequences out of 15000+600000
- 578564 words of font info for 87 fonts, out of 8000000 for 9000
+ 13343 strings out of 473190
+ 213757 string characters out of 5715801
+ 654227 words of memory out of 5000000
+ 36372 multiletter control sequences out of 15000+600000
+ 576865 words of font info for 79 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,11n,79p,1217b,483s stack positions out of 10000i,1000n,20000p,200000b,200000s
-</usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr7.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1000.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1200.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1440.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1728.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm0800.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1000.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1200.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfti1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sftt1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sftt1200.pfb>
-Output written on PAPER.pdf (5 pages, 348753 bytes).
+ 75i,11n,79p,1224b,577s stack positions out of 10000i,1000n,20000p,200000b,200000s
+</usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1000.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1200.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1440.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfbx1728.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm0800.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1000.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1200.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sfti1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sftt1095.pfb></usr/local/texlive/2025/texmf-dist/fonts/type1/public/cm-super/sftt1200.pfb>
+Output written on PAPER.pdf (5 pages, 355553 bytes).
 PDF statistics:
- 203 PDF objects out of 1000 (max. 8388607)
- 151 compressed objects within 2 object streams
- 57 named destinations out of 1000 (max. 500000)
+ 213 PDF objects out of 1000 (max. 8388607)
+ 159 compressed objects within 2 object streams
+ 61 named destinations out of 1000 (max. 500000)
  1 words of extra memory for PDF output out of 10000 (max. 10000000)
 

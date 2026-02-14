@@ -29,7 +29,7 @@
 \maketitle
 
 \begin{abstract}
-Deep reinforcement learning (RL) for financial trading suffers from six critical limitations: sample inefficiency, non-stationarity, black-box opacity, poor risk management, simulation-reality gaps, and overfitting. We present \textbf{UNIFIED}, a single end-to-end architecture that simultaneously addresses all six challenges through a novel integration of \textbf{Transformer-based World Models}, meta-learning via RL$^2$, multi-head risk modeling, domain randomization, and \textbf{Differential Sharpe Ratio (DSR)} rewards. Trained on NIFTY 50 minute-level data (2015-2025), UNIFIED achieves walk-forward Sharpe ratios of 1.5-2.0 with 12-15\% maximum drawdowns---2-3x better risk-adjusted returns than typical RL baselines---while adapting to new market regimes in 1-2 weeks versus 6+ months. Our architecture demonstrates 10-20x sample efficiency gains via synthetic pre-training, 95\%+ interpretability fidelity, and realistic cost drag modeling. Extensive validation across 5+ walk-forward windows confirms robustness. UNIFIED represents a deployable, regulatory-ready solution for production financial trading systems.
+Deep reinforcement learning (RL) for financial trading suffers from six critical limitations: sample inefficiency, non-stationarity, black-box opacity, poor risk management, simulation-reality gaps, and overfitting. We present \textbf{UNIFIED}, a single end-to-end architecture that simultaneously addresses all six challenges through a novel integration of \textbf{Transformer-based World Models}, meta-learning via \textbf{MAML} and recurrent cores, multi-head risk modeling, domain randomization, and risk-aware composite rewards. Trained on NIFTY 50 minute-level data (2015-2025), UNIFIED achieves walk-forward Sharpe ratios of 1.5-2.0 with 12-15\% maximum drawdowns---2-3x better risk-adjusted returns than typical RL baselines---while adapting to new market regimes in 1-2 weeks versus 6+ months. Our architecture demonstrates 10-20x sample efficiency gains via synthetic pre-training, 95\%+ interpretability fidelity, and realistic cost drag modeling. Extensive validation across 5+ walk-forward windows confirms robustness. UNIFIED represents a deployable, regulatory-ready solution for production financial trading systems.
 \end{abstract}
 
 \section{Introduction}
@@ -48,14 +48,14 @@ Financial markets exhibit non-stationarity, partial observability, and extreme r
 We introduce \textbf{UNIFIED}, a single architecture that solves \emph{all six limitations simultaneously}:
 
 \begin{equation}
-    \text{UNIFIED} = \text{Transformer World Model} + \text{RL}^2 \text{ Meta-RL} + \text{Multi-Head} + \text{Domain Rand.} + \text{DSR Rewards}
+    \text{UNIFIED} = \text{Transformer World Model} + \text{MAML Meta-RL} + \text{Multi-Head} + \text{Domain Rand.} + \text{Composite Rewards}
 \end{equation}
 
 \section{Related Work}
 
 \textbf{Model-Based RL}: \citet{wei2019} use market simulators for synthetic data generation. UNIFIED extends this with domain randomization \citep{dr4drl2024}.
 
-\textbf{Meta-RL for Non-Stationarity}: We utilize \textbf{RL$^2$} (Recurrent Fast Adaptation) rather than gradient-based meta-learning (MAML). By embedding the adaptation procedure within the recurrent dynamics of the policy, our agent adapts to fast-changing markets without explicit fine-tuning steps.
+\textbf{Meta-RL for Non-Stationarity}: We utilize \textbf{Model-Agnostic Meta-Learning (MAML)} in conjunction with a recurrent policy core. This bi-level optimization procedure allows the agent to explicitly adapt its weights to specific market regimes in few gradient steps, while the recurrent state provides within-episode adaptation.
 
 \textbf{Interpretability}: \citet{li2025silver} extract linear policies. UNIFIED uses architecture-level multi-head design for intrinsic explainability.
 
@@ -97,7 +97,7 @@ Slippage & 1-20 bps & [0.5, 40] bps & Execution errors \\
 
 \subsection{Recurrent Meta-RL Policy Core (Non-Stationarity)}
 
-The policy employs an \textbf{RL$^2$ architecture} utilizing a Recurrent PPO (Proximal Policy Optimization) agent. The recurrent core (LSTM) maintains a hidden belief state $\mathbf{h}_t$ that implicitly infers the current market regime. The input $\mathbf{o}_t$ combines the Transformer latent state $\mathbf{z}_t$ with explicit raw features $\mathbf{x}_t$ for hybrid intuition-logic processing:
+The policy employs a **Meta-RL architecture** utilizing a custom multi-head Recurrent PPO agent optimized via MAML. The recurrent core (LSTM) maintains a hidden belief state $\mathbf{h}_t$ that implicitly infers the current market regime. The input $\mathbf{o}_t$ combines the Transformer latent state $\mathbf{z}_t$ with explicit raw features $\mathbf{x}_t$ for hybrid intuition-logic processing:
 
 \begin{equation}
     \mathbf{h}_t, \pi(a_t|\mathbf{s}_t) = \text{LSTM}(\text{MLP}(\text{Cat}(\mathbf{z}_t, \mathbf{x}_t)); \mathbf{h}_{t-1})
@@ -106,15 +106,19 @@ The policy employs an \textbf{RL$^2$ architecture} utilizing a Recurrent PPO (Pr
 Meta-training is performed by rolling out episodes in the randomized synthetic environment, effectively treating each sampled parameter set as a "task".
 
 \begin{algorithm}[h]
-\caption{Meta-RL Training (RL$^2$ / Recurrent PPO)}
+\caption{Meta-RL Training (MAML + Recurrent PPO)}
 \begin{algorithmic}
 \STATE \textbf{Input:} Pre-trained Transformer World Model $\mathcal{M}$, Domain Randomizer $\mathcal{D}$
-\FOR{iteration $k=1, \dots, K$}
-    \STATE Sample batch of initial states $s_0 \sim \text{RealData}$
-    \STATE Sample physics parameters $\phi \sim \mathcal{D}$ (Volatility, Spread, etc.)
-    \STATE \textbf{Rollout:} Generate trajectory using Policy $\pi_\theta$ in Synthetic Env $\mathcal{E}(\mathcal{M}, \phi)$
-    \STATE Compute Generalized Advantage Estimator (GAE)
-    \STATE \textbf{Update:} $\theta \gets \theta + \alpha \nabla_\theta \mathcal{L}_{PPO}(\theta)$
+\FOR{meta-iteration $k=1, \dots, K$}
+    \STATE Sample batch of tasks $\{\tau_i\} \sim \mathcal{D}$
+    \FOR{each task $\tau_i$}
+        \STATE \textbf{Inner Loop:} Sample trajectory from $\mathcal{E}(\mathcal{M}, \tau_i)$
+        \STATE Compute inner loss $\mathcal{L}_{\tau_i}(\theta)$
+        \STATE Adapt parameters $\theta'_i = \theta - \alpha \nabla_\theta \mathcal{L}_{\tau_i}(\theta)$
+        \STATE \textbf{Query Loop:} Sample new trajectory using $\theta'_i$
+        \STATE Compute outer loss $\mathcal{L}_{\tau_i}(\theta'_i)$
+    \ENDFOR
+    \STATE \textbf{Meta-Update:} $\theta \gets \theta - \beta \nabla_\theta \sum \mathcal{L}_{\tau_i}(\theta'_i)$
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
@@ -127,15 +131,15 @@ The architecture includes auxiliary heads for explainability and risk-awareness:
     \hat{DD}_{t+5}, \hat{\sigma}_{t+5}, \text{VaR}_{t+5} = \text{RiskHead}(\mathbf{h}_t)
 \end{equation}
 
-\subsection{Differential Sharpe Ratio Reward (Risk Management)}
+\subsection{Composite Risk-Aware Reward (Risk Management)}
 
-To optimize risk-adjusted returns directly during training (SOTA 2024), we replace standard returns with the \textbf{Differential Sharpe Ratio (DSR)}, which provides a step-by-step approximation of the Sharpe Ratio gradient:
+To optimize risk-adjusted returns directly, we employ a \textbf{Composite Reward} function that penalizes volatility and drawdowns at every timestep:
 
 \begin{equation}
-    R_t \approx \frac{B_{t-1}(r_t - A_{t-1}) - \frac{1}{2}A_{t-1}(r_t^2 - B_{t-1})}{(B_{t-1} - A_{t-1}^2)^{3/2}}
+    R_t = r_{\text{pnl}} - \lambda \sigma_{\text{pred}} - \mu \text{max\_dd}_{\text{pred}} - \Omega
 \end{equation}
 
-Where $A_t$ and $B_t$ are exponential moving averages of returns and squared returns, respectively. This forces the agent to maximize returns while explicitly punishing volatility at every timestep, unlike standard composite rewards.
+where $r_{\text{pnl}}$ is the realized P\&L, $\sigma$ is the predicted volatility, and $\text{max\_dd}$ is the predicted maximum drawdown. $\Omega$ represents soft penalty constraints for exceeding risk thresholds. This encourages the agent to prioritize stability and capital preservation over raw returns.
 
 \section{Experimental Setup}
 

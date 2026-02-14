@@ -103,12 +103,12 @@ class WorldModel(nn.Module):
             nn.Linear(128, 2)  # mean, std
         )
         
-        # Volume head: predict (volume_mean, volume_std)
+        # Volume head: predict (volume_mean, volume_std, spread_mean, spread_std)
         self.volume_head = nn.Sequential(
             nn.Linear(lstm_output_size, 128),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(128, 2)  # mean, std
+            nn.Linear(128, 4)  # volume (mean, std), spread (mean, std)
         )
         
         # Regime classification head: 4 regimes
@@ -175,9 +175,12 @@ class WorldModel(nn.Module):
             nn.functional.softplus(price_pred[..., 1:]) + 1e-6  # std (positive)
         ], dim=-1)
         
+        # Volume and Spread predictions
         volume_pred = torch.cat([
-            volume_pred[..., :1],
-            nn.functional.softplus(volume_pred[..., 1:]) + 1e-6
+            volume_pred[..., 0:1],  # volume mean
+            nn.functional.softplus(volume_pred[..., 1:2]) + 1e-6,  # volume std
+            volume_pred[..., 2:3],  # spread mean
+            nn.functional.softplus(volume_pred[..., 3:4]) + 1e-6   # spread std
         ], dim=-1)
         
         return {
@@ -244,6 +247,7 @@ class WorldModel(nn.Module):
             'returns': [],
             'volatilities': [],
             'volumes': [],
+            'spreads': [],
             'regimes': []
         }
         
@@ -258,18 +262,22 @@ class WorldModel(nn.Module):
                 # Sample from predicted distributions
                 return_mean, return_std = pred['price_pred'][:, 0], pred['price_pred'][:, 1]
                 volume_mean, volume_std = pred['volume_pred'][:, 0], pred['volume_pred'][:, 1]
+                spread_mean, spread_std = pred['volume_pred'][:, 2], pred['volume_pred'][:, 3]
                 
                 if randomize:
                     return_std = return_std * (1 + noise_scale * torch.randn_like(return_std))
                     volume_std = volume_std * (1 + noise_scale * torch.randn_like(volume_std))
+                    spread_std = spread_std * (1 + noise_scale * torch.randn_like(spread_std))
                 
                 sampled_return = torch.normal(return_mean, return_std)
                 sampled_volume = torch.normal(volume_mean, volume_std)
+                sampled_spread = torch.normal(spread_mean, spread_std)
                 regime_probs = torch.softmax(pred['regime_logits'], dim=-1)
                 
                 trajectories['returns'].append(sampled_return)
                 trajectories['volatilities'].append(return_std)
                 trajectories['volumes'].append(sampled_volume)
+                trajectories['spreads'].append(sampled_spread)
                 trajectories['regimes'].append(regime_probs)
                 
                 hidden = pred['hidden']
@@ -350,6 +358,7 @@ class WorldModelLoss(nn.Module):
             targets: Ground truth targets
                 - returns: [batch, seq_len]
                 - volumes: [batch, seq_len]
+                - spreads: [batch, seq_len] (optional spread proxy)
                 - regimes: [batch, seq_len] (class indices)
             
         Returns:
@@ -369,17 +378,35 @@ class WorldModelLoss(nn.Module):
             target = targets['returns'][:, 0]
             price_loss = -self._gaussian_nll(target, pred_mean, pred_std).mean()
         
-        # Volume prediction loss
+        # Volume and Spread prediction loss
         if self.use_mse:
             volume_loss = nn.functional.mse_loss(
                 predictions['volume_pred'][:, -1, 0],
                 targets['volumes'][:, 0]
             )
+            # Spread loss if target available, else 0
+            if 'spreads' in targets:
+                 spread_loss = nn.functional.mse_loss(
+                     predictions['volume_pred'][:, -1, 2],
+                     targets['spreads'][:, 0]
+                 )
+            else:
+                 spread_loss = torch.tensor(0.0, device=volume_loss.device)
         else:
-            pred_mean = predictions['volume_pred'][:, -1, 0]
-            pred_std = predictions['volume_pred'][:, -1, 1]
-            target = targets['volumes'][:, 0]
-            volume_loss = -self._gaussian_nll(target, pred_mean, pred_std).mean()
+            # Volume NLL
+            pred_mean_v = predictions['volume_pred'][:, -1, 0]
+            pred_std_v = predictions['volume_pred'][:, -1, 1]
+            target_v = targets['volumes'][:, 0]
+            volume_loss = -self._gaussian_nll(target_v, pred_mean_v, pred_std_v).mean()
+            
+            # Spread NLL
+            if 'spreads' in targets:
+                pred_mean_s = predictions['volume_pred'][:, -1, 2]
+                pred_std_s = predictions['volume_pred'][:, -1, 3]
+                target_s = targets['spreads'][:, 0]
+                spread_loss = -self._gaussian_nll(target_s, pred_mean_s, pred_std_s).mean()
+            else:
+                spread_loss = torch.tensor(0.0, device=volume_loss.device)
         
         # Regime classification loss
         # Use last step prediction
@@ -479,7 +506,7 @@ class TransformerWorldModel(nn.Module):
         self.volume_head = nn.Sequential(
             nn.Linear(d_model, 64),
             nn.ReLU(),
-            nn.Linear(64, 2)
+            nn.Linear(64, 4) # volume (mean, std), spread (mean, std)
         )
         
         self.regime_head = nn.Sequential(
@@ -538,9 +565,12 @@ class TransformerWorldModel(nn.Module):
             torch.clamp(nn.functional.softplus(price_pred[..., 1:]), 1e-6, 0.2) # std return max 20%
         ], dim=-1)
         
+        # Volume and Spread
         volume_pred = torch.cat([
-            torch.clamp(volume_pred[..., :1], -10.0, 10.0),
-            torch.clamp(nn.functional.softplus(volume_pred[..., 1:]), 1e-6, 5.0)
+            torch.clamp(volume_pred[..., 0:1], -10.0, 10.0), # volume mean
+            torch.clamp(nn.functional.softplus(volume_pred[..., 1:2]), 1e-6, 5.0), # volume std
+            torch.clamp(volume_pred[..., 2:3], 0.0, 1.0), # spread mean (proxy 0-1)
+            torch.clamp(nn.functional.softplus(volume_pred[..., 3:4]), 1e-6, 0.5) # spread std
         ], dim=-1)
         
         return {
@@ -594,6 +624,7 @@ class TransformerWorldModel(nn.Module):
             'returns': [],
             'volatilities': [],
             'volumes': [],
+            'spreads': [],
             'regimes': []
         }
         
@@ -613,16 +644,21 @@ class TransformerWorldModel(nn.Module):
                 # Sample
                 return_mean, return_std = pred['price_pred'][:, 0], pred['price_pred'][:, 1]
                 volume_mean, volume_std = pred['volume_pred'][:, 0], pred['volume_pred'][:, 1]
+                spread_mean, spread_std = pred['volume_pred'][:, 2], pred['volume_pred'][:, 3]
                 
                 if randomize:
                     return_std = return_std * (1 + noise_scale * torch.randn_like(return_std))
                     volume_std = volume_std * (1 + noise_scale * torch.randn_like(volume_std))
+                    spread_std = spread_std * (1 + noise_scale * torch.randn_like(spread_std))
                 
                 sampled_return = torch.normal(return_mean, return_std)
                 sampled_return = torch.clamp(sampled_return, -0.2, 0.2)
                 
                 sampled_volume = torch.normal(volume_mean, volume_std)
                 sampled_volume = torch.clamp(sampled_volume, -10.0, 10.0)
+
+                sampled_spread = torch.normal(spread_mean, spread_std)
+                sampled_spread = torch.clamp(sampled_spread, 0.0, 1.0)
                 
                 regime_probs = torch.softmax(pred['regime_logits'], dim=-1)
                 
@@ -630,6 +666,7 @@ class TransformerWorldModel(nn.Module):
                 trajectories['returns'].append(sampled_return)
                 trajectories['volatilities'].append(return_std)
                 trajectories['volumes'].append(sampled_volume)
+                trajectories['spreads'].append(sampled_spread)
                 trajectories['regimes'].append(regime_probs)
                 
                 # UPDATE WINDOW (Auto-regression)
