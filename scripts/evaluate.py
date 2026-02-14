@@ -10,9 +10,11 @@ import logging
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm import tqdm
 import torch
 from gymnasium.wrappers import TimeLimit
+from typing import List, Dict
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -27,9 +29,10 @@ import empyrical
 logger = logging.getLogger('evaluate')
 
 def evaluate_policy(policy, env, episodes=1):
-    """Evaluate policy on environment."""
+    """Evaluate policy on environment and return detailed info."""
     trajectory_returns = []
     trajectory_values = []
+    trajectory_infos = []
     
     for _ in tqdm(range(episodes), desc="Evaluating"):
         obs, _ = env.reset()
@@ -38,6 +41,7 @@ def evaluate_policy(policy, env, episodes=1):
         
         # Track portfolio value
         values = [env.unwrapped.portfolio_value]
+        infos = []
         
         # RNN state
         lstm_states = None
@@ -53,15 +57,117 @@ def evaluate_policy(policy, env, episodes=1):
             obs, reward, done, truncated, info = env.step(action)
             episode_start[0] = False
             values.append(env.unwrapped.portfolio_value)
-        
+            
+            # Store regime and returns for attribution
+            # Get regime from env directly
+            regime = env.unwrapped.df.iloc[env.unwrapped.current_step]['regime_name'] if hasattr(env.unwrapped, 'df') else 'unknown'
+            info['regime_name'] = regime
+            infos.append(info)
+            
         # Calculate returns from values
         values = np.array(values)
         if len(values) > 1:
             returns = np.diff(values) / values[:-1]
             trajectory_returns.append(returns)
             trajectory_values.append(values)
+            trajectory_infos.append(infos)
         
-    return trajectory_returns, trajectory_values
+    return trajectory_returns, trajectory_values, trajectory_infos
+
+def plot_regime_performance(infos: List[List[Dict]], save_path: Path):
+    """Plot performance attribution by market regime."""
+    all_data = []
+    for episode in infos:
+        for step in episode:
+            all_data.append({
+                'Regime': step['regime_name'],
+                'Return': step['return'],
+                'Position': step['position']
+            })
+    
+    df = pd.DataFrame(all_data)
+    if df.empty: return
+
+    plt.figure(figsize=(12, 6))
+    
+    plt.subplot(1, 2, 1)
+    sns.barplot(data=df, x='Regime', y='Return', estimator=np.mean)
+    plt.title('Average Return by Regime')
+    plt.xticks(rotation=45)
+    
+    plt.subplot(1, 2, 2)
+    sns.boxplot(data=df, x='Regime', y='Position')
+    plt.title('Position Sizing by Regime')
+    plt.xticks(rotation=45)
+    
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+def run_evaluation_on_data(data_path: Path, config: dict, world_model, policy_path: Path, args: argparse.Namespace, device: str, results_suffix: str = ""):
+    """Helper to run evaluation on a specific data file."""
+    logger.info(f"Evaluating on {data_path.name}")
+    
+    dataset = TimeSeriesDataset(
+        data_path=str(data_path),
+        sequence_length=config['data']['sequence_length'],
+        prediction_horizon=config['data']['prediction_horizon']
+    )
+    
+    env = TradingEnv(
+        dataset=dataset,
+        world_model=world_model,
+        window_size=config['data']['sequence_length'],
+        transaction_cost_bps=args.cost_bps,
+        device=device
+    )
+    env = TimeLimit(env, max_episode_steps=5000)
+    
+    policy = MetaPolicy(env, config, device=device)
+    policy.load(str(policy_path))
+    
+    returns_list, values_list, infos_list = evaluate_policy(policy, env, episodes=args.episodes)
+    
+    if not returns_list:
+        return None
+
+    metrics = {
+        'sharpe': [],
+        'sortino': [],
+        'calmar': [],
+        'max_dd': [],
+        'total_return': [],
+        'win_rate': []
+    }
+    
+    for returns, values, infos in zip(returns_list, values_list, infos_list):
+        metrics['sharpe'].append(empyrical.sharpe_ratio(returns))
+        metrics['sortino'].append(empyrical.sortino_ratio(returns))
+        metrics['calmar'].append(empyrical.calmar_ratio(returns))
+        metrics['max_dd'].append(empyrical.max_drawdown(returns))
+        metrics['total_return'].append((values[-1]/values[0] - 1) * 100)
+        metrics['win_rate'].append(np.mean(returns > 0) * 100)
+        
+    # Aggregate
+    agg_metrics = {k: np.mean(v) for k, v in metrics.items()}
+    
+    # Save artifacts
+    results_dir = Path(__file__).parent.parent / 'logs/evaluation' / results_suffix
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Plot Mean Equity
+    plt.figure(figsize=(10, 6))
+    min_len = min(len(v) for v in values_list)
+    truncated_values = [v[:min_len] for v in values_list]
+    mean_values = np.mean(truncated_values, axis=0)
+    plt.plot(mean_values)
+    plt.title(f"Mean Equity Curve - {results_suffix}")
+    plt.savefig(results_dir / 'mean_equity.png')
+    plt.close()
+    
+    plot_regime_performance(infos_list, results_dir / 'regime_performance.png')
+    
+    return agg_metrics
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate UNIFIED Policy')
@@ -69,6 +175,7 @@ def main():
     parser.add_argument('--model_path', type=str, help='Path to policy checkpoint')
     parser.add_argument('--cost_bps', type=float, default=5.0, help='Transaction cost in basis points')
     parser.add_argument('--episodes', type=int, default=20, help='Number of episodes to evaluate')
+    parser.add_argument('--walk_forward', action='store_true', help='Run walk-forward validation')
 
     args = parser.parse_args()
     
@@ -138,109 +245,50 @@ def main():
     world_model.eval()
     logger.info("World Model loaded")
     
-    # Create Environment
-    env = TradingEnv(
-        dataset=dataset,
-        world_model=world_model,
-        window_size=config['data']['sequence_length'],
-        transaction_cost_bps=args.cost_bps,
-        device=device
-    )
-    
-    # Wrap with TimeLimit to ensure finite evaluation
-    env = TimeLimit(env, max_episode_steps=5000)
-    
-    # Load Policy
+    # Load Policy path
     if args.model_path:
         model_path = Path(args.model_path)
     else:
-        # Default to Stage 3 model
         model_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage3_policy.zip'
-        
-    if not model_path.exists():
-        logger.error(f"Model not found at {model_path}")
-        return
-        
-    logger.info(f"Loading policy from {model_path}")
-    policy = MetaPolicy(env, config, device=device)
-    policy.load(str(model_path))
-    
-    # Run Evaluation
-
-    episodes = args.episodes
-    returns_list, values_list = evaluate_policy(policy, env, episodes=episodes)
-    
-    if not returns_list:
-        logger.error("No returns collected (episode too short?)")
-        return
-
-    # Metrics
-    # Metrics aggregation
-    all_metrics = {
-        'sharpe': [],
-        'sortino': [],
-        'max_dd': [],
-        'cagr': [],
-        'total_return': []
-    }
-    
-    for returns, values in zip(returns_list, values_list):
-        all_metrics['sharpe'].append(empyrical.sharpe_ratio(returns))
-        all_metrics['sortino'].append(empyrical.sortino_ratio(returns))
-        all_metrics['max_dd'].append(empyrical.max_drawdown(returns))
-        all_metrics['cagr'].append(empyrical.cagr(returns))
-        all_metrics['total_return'].append((values[-1]/values[0] - 1) * 100)
-        
-    # Compute stats
-    logger.info("\n" + "="*50)
-    logger.info(f"Performance Metrics ({episodes} Episodes)")
-    logger.info("="*50)
-    
-    for metric, values in all_metrics.items():
-        mean_val = np.mean(values)
-        std_val = np.std(values)
-        
-        # Scaling correction for % metrics if needed (Sharpe/Sortino are ratios)
-        is_pct = metric in ['max_dd', 'cagr', 'total_return']
-        
-        display_mean = mean_val * 100 if metric == 'max_dd' else mean_val
-        display_std = std_val * 100 if metric == 'max_dd' else std_val
-        
-        if metric == 'max_dd': # Drawdown is usually negative
-            suffix = "%"
-        elif is_pct:
-            suffix = "%" 
-        else:
-            suffix = ""
+        if not model_path.exists():
+            model_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage2_policy.zip'
             
-        logger.info(f"{metric.replace('_', ' ').title():<15}: {display_mean:>8.4f}{suffix} ± {display_std:.4f}")
+    if not model_path.exists():
+        logger.error(f"Policy not found at {model_path}")
+        return
+
+    if args.walk_forward:
+        logger.info("Running Walk-Forward Validation...")
+        wf_files = sorted(list((project_root / config['data']['processed_path']).glob('wf_test_*.parquet')))
+        if not wf_files:
+            logger.error("No walk-forward files found!")
+            return
+            
+        wf_results = []
+        for i, wf_file in enumerate(wf_files):
+            res = run_evaluation_on_data(wf_file, config, world_model, model_path, args, device, f"wf_window_{i}")
+            if res:
+                wf_results.append(res)
         
-    logger.info("="*50)
-    
-    # Save results
-    results_dir = project_root / 'logs/evaluation'
-    results_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Plot equity curve
-    plt.figure(figsize=(10, 6))
-    
-    # Plot individual episodes
-    for values in values_list:
-        plt.plot(values, alpha=0.3, color='gray') # Faint lines for individual runs
-        
-    # Plot mean
-    min_len = min(len(v) for v in values_list)
-    truncated_values = [v[:min_len] for v in values_list]
-    mean_values = np.mean(truncated_values, axis=0)
-    plt.plot(mean_values, color='blue', linewidth=2, label='Mean Equity')
-    
-    plt.title(f"Equity Curve ({episodes} Episodes)")
-    plt.legend()
-    plt.xlabel("Steps")
-    plt.ylabel("Portfolio Value")
-    plt.grid(True)
-    plt.savefig(results_dir / 'equity_curve.png')
-    logger.info(f"Results saved to {results_dir}")
+        # Summary of WF
+        if wf_results:
+            wf_df = pd.DataFrame(wf_results)
+            logger.info("\n" + "="*50)
+            logger.info("WALK-FORWARD SUMMARY")
+            logger.info("="*50)
+            for col in wf_df.columns:
+                logger.info(f"{col.title():<15}: {wf_df[col].mean():>8.4f}")
+            logger.info("="*50)
+    else:
+        # Standard Evaluation on val.parquet
+        res = run_evaluation_on_data(Path(data_path_str), config, world_model, model_path, args, device, "standard_eval")
+        if res:
+            logger.info("\n" + "="*50)
+            logger.info("EVALUATION SUMMARY")
+            logger.info("="*50)
+            for k, v in res.items():
+                logger.info(f"{k.title():<15}: {v:>8.4f}")
+            logger.info("="*50)
 
 if __name__ == '__main__':
     main()

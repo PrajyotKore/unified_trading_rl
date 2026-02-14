@@ -10,7 +10,8 @@ import logging
 import torch
 import pandas as pd
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -123,11 +124,24 @@ def main():
         )
         
         # Initialize Policy
-        policy = MetaPolicy(env, config, device=device)
+        # Use TensorBoard log if enabled
+        tb_log = str(project_root / config['logging']['log_dir'] / 'meta_rl/stage2') if config['logging'].get('tensorboard') else None
+        
+        policy = MetaPolicy(env, config, device=device, tensorboard_log=tb_log)
+        
+        # Callbacks
+        checkpoint_callback = CheckpointCallback(
+            save_freq=config['training'].get('save_frequency', 5000),
+            save_path=str(project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage2_checkpoints'),
+            name_prefix='stage2_model'
+        )
         
         # Train
-        logger.info("Training policy on synthetic data...")
-        policy.learn(total_timesteps=config['training']['stage2_timesteps'])
+        logger.info(f"Training policy on synthetic data for {config['training']['stage2_timesteps']} steps...")
+        policy.learn(
+            total_timesteps=config['training']['stage2_timesteps'],
+            callback=checkpoint_callback
+        )
         
         # Save Stage 2 Checkpoint
         save_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage2_policy.zip'
@@ -139,10 +153,6 @@ def main():
     if args.stage <= 3:
         logger.info("\n=== STAGE 3: Online Fine-tuning on Real Data ===")
         
-        # Create Real Environment
-        # Pass dataset and world_model for Latent State
-        # df is also needed usually for internal step logic, which dataset wraps
-        
         real_env = TradingEnv(
             dataset=dataset,
             world_model=world_model,
@@ -152,34 +162,161 @@ def main():
             device=device
         )
         
-        # Load Stage 2 policy if needed
         policy_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage2_policy.zip'
         
+        if args.resume:
+            policy_path = Path(args.resume)
+
+        tb_log = str(project_root / config['logging']['log_dir'] / 'meta_rl/stage3') if config['logging'].get('tensorboard') else None
+
         if policy_path.exists():
-            logger.info(f"Loading Stage 2 policy from {policy_path}")
-            policy = MetaPolicy(real_env, config, device=device)
+            logger.info(f"Loading policy from {policy_path}")
+            policy = MetaPolicy(real_env, config, device=device, tensorboard_log=tb_log)
             policy.load(str(policy_path))
         else:
-            logger.warning("Stage 2 policy not found. Initializing from scratch (Not recommended).")
-            policy = MetaPolicy(real_env, config, device=device)
+            logger.warning("Policy checkpoint not found. Initializing from scratch.")
+            policy = MetaPolicy(real_env, config, device=device, tensorboard_log=tb_log)
             
-        # Update Environment (set logic specific to real env)
-        # policy.model.set_env(real_env) 
-        # Note: sb3 set_env works, but policy helper wrapper might not expose it directly.
-        # But policy.model is the RecurrentPPO object.
         policy.model.set_env(real_env)
         
-        # Train (Fine-tune)
-        logger.info("Fine-tuning policy on real data...")
-        policy.learn(total_timesteps=config['training']['stage3_timesteps'])
+        # Callbacks
+        checkpoint_callback = CheckpointCallback(
+            save_freq=config['training'].get('save_frequency', 5000),
+            save_path=str(project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage3_checkpoints'),
+            name_prefix='stage3_model'
+        )
         
-        # Save Stage 3 Checkpoint
+        logger.info(f"Fine-tuning policy on real data for {config['training']['stage3_timesteps']} steps...")
+        policy.learn(
+            total_timesteps=config['training']['stage3_timesteps'],
+            callback=checkpoint_callback
+        )
+        
         save_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage3_policy.zip'
         policy.save(str(save_path))
         logger.info(f"Stage 3 (Real) complete. Saved to {save_path}")
 
-    # STAGE 4-5 (Placeholders or Extensions)
-    # ...
+    # STAGE 4: Risk-aware Multi-task Fine-tuning
+    if args.stage <= 4:
+        logger.info("\n=== STAGE 4: Risk-aware Multi-task Fine-tuning ===")
+        
+        # For Stage 4, we might vary risk parameters (lambda/mu)
+        risk_configs = [
+            {'volatility_penalty': 0.1, 'drawdown_penalty': 0.5}, # Balanced
+            {'volatility_penalty': 0.5, 'drawdown_penalty': 1.0}, # Conservative
+            {'volatility_penalty': 0.05, 'drawdown_penalty': 0.2} # Aggressive
+        ]
+        
+        # Load Stage 3 policy
+        policy_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage3_policy.zip'
+        
+        # In multi-task, we can cycle through different risk profiles
+        # For simplicity, we'll use the environment with config rewards
+        # but one could wrap it in a VecEnv with different parameters.
+        
+        tb_log = str(project_root / config['logging']['log_dir'] / 'meta_rl/stage4') if config['logging'].get('tensorboard') else None
+
+        real_env = TradingEnv(
+            dataset=dataset,
+            world_model=world_model,
+            window_size=config['data']['sequence_length'],
+            transaction_cost_bps=5.0,
+            risk_config=config['reward'],
+            device=device
+        )
+
+        if policy_path.exists():
+            policy = MetaPolicy(real_env, config, device=device, tensorboard_log=tb_log)
+            policy.load(str(policy_path))
+            logger.info(f"Stage 4: Loaded Stage 3 policy from {policy_path}")
+        else:
+            policy = MetaPolicy(real_env, config, device=device, tensorboard_log=tb_log)
+            logger.warning("Stage 4: Stage 3 policy not found. Starting from scratch.")
+
+        policy.model.set_env(real_env)
+        
+        # Callbacks
+        checkpoint_callback = CheckpointCallback(
+            save_freq=config['training'].get('save_frequency', 5000),
+            save_path=str(project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage4_checkpoints'),
+            name_prefix='stage4_model'
+        )
+
+        logger.info(f"Training Stage 4: Risk-aware adaptation for {config['training']['stage4_timesteps']} steps...")
+        policy.learn(
+            total_timesteps=config['training']['stage4_timesteps'],
+            callback=checkpoint_callback
+        )
+        
+        save_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage4_policy.zip'
+        policy.save(str(save_path))
+        logger.info(f"Stage 4 complete. Saved to {save_path}")
+
+    # STAGE 5: Validation & Final Evaluation
+    if args.stage <= 5:
+        logger.info("\n=== STAGE 5: Final Evaluation ===")
+        
+        # Load Test Data
+        test_path = project_root / config['data']['processed_path'] / 'test.parquet'
+        if not test_path.exists():
+            logger.error(f"Test data not found at {test_path}")
+            return
+            
+        test_dataset = TimeSeriesDataset(
+            str(test_path),
+            sequence_length=config['data']['sequence_length'],
+            prediction_horizon=config['data']['prediction_horizon']
+        )
+        
+        eval_env = TradingEnv(
+            dataset=test_dataset,
+            world_model=world_model,
+            window_size=config['data']['sequence_length'],
+            transaction_cost_bps=5.0,
+            risk_config=config['reward'],
+            device=device
+        )
+        
+        # Load best policy (Stage 4)
+        policy_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage4_policy.zip'
+        if not policy_path.exists():
+            policy_path = project_root / config['logging']['checkpoint_dir'] / 'meta_rl/stage3_policy.zip'
+            
+        if policy_path.exists():
+            policy = MetaPolicy(eval_env, config, device=device)
+            policy.load(str(policy_path))
+            logger.info(f"Evaluating policy from {policy_path}")
+        else:
+            logger.error("No policy found for evaluation!")
+            return
+
+        # Run Evaluation Loop
+        obs, _ = eval_env.reset()
+        done = False
+        portfolio_values = []
+        
+        logger.info("Running evaluation on test set...")
+        while not done:
+            action, _states = policy.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = eval_env.step(action)
+            portfolio_values.append(info['portfolio_value'])
+            done = terminated or truncated
+            
+        # Calculate Metrics
+        returns = pd.Series(portfolio_values).pct_change().dropna()
+        total_return = (portfolio_values[-1] / portfolio_values[0]) - 1
+        sharpe = (returns.mean() / returns.std()) * np.sqrt(252 * 6.5 * 60) if len(returns) > 0 else 0 # Minutely to Annualized
+        
+        # Drawdown
+        peak = pd.Series(portfolio_values).expanding().max()
+        drawdown = (pd.Series(portfolio_values) - peak) / peak
+        max_drawdown = drawdown.min()
+        
+        logger.info(f"Final Evaluation Metrics:")
+        logger.info(f"Total Return: {total_return:.2%}")
+        logger.info(f"Annualized Sharpe: {sharpe:.2f}")
+        logger.info(f"Max Drawdown: {max_drawdown:.2%}")
+        logger.info(f"Final Portfolio Value: {portfolio_values[-1]:.2f}")
 
 if __name__ == '__main__':
     main()

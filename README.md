@@ -35,24 +35,31 @@ unified_trading/
 ├── config/
 │   └── config.yaml              # Hyperparameters
 ├── src/
-│   ├── data/                    # Data loading & feature engineering
+│   ├── data/                    # Data loading, feature engineering, real-time connectors
+│   │   └── realtime_connector.py # Yahoo Finance live data integration
 │   ├── models/                  # World model, policy, domain randomization
 │   ├── environments/            # Trading env & portfolio manager
-│   ├── training/                # 6-stage training pipeline
+│   ├── api/                     # Model serving API
+│   │   └── server.py            # FastAPI model server
+│   ├── training/                # Training logic
 │   ├── evaluation/              # Backtesting & walk-forward validation
 │   └── utils/                   # Utilities
-├── tests/                       # Unit & integration tests
 ├── scripts/                     # Executable scripts
-├── notebooks/                   # EDA & analysis
+│   ├── download_data.py         # Step 1: Data acquisition
+│   ├── train_world_model.py     # Stage 1: World Model training
+│   ├── train_meta_rl.py        # Stages 2-5: Meta-RL training
+│   ├── evaluate.py              # Stage 6: Walk-forward evaluation
+│   ├── train_continual.py       # Stage 7: Continual domain randomization
+│   └── preprocess_data.py       # Data cleaning and preparation
 ├── data/                        # Raw & processed data
 ├── models/checkpoints/          # Saved models
-└── logs/                        # TensorBoard logs
+└── logs/                        # TensorBoard & execution logs
 ```
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Step-by-Step)
 
-### 1. Installation
-
+### 1. Installation & Setup
+First, clone the repository and set up the environment:
 ```bash
 # Create virtual environment
 python -m venv venv
@@ -62,37 +69,50 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Download Data
-
+### 2. Data Acquisition & Preprocessing
+Download the NIFTY 50 minute-level data from Kaggle and prepare it for training:
 ```bash
-# Configure Kaggle API credentials
-mkdir -p ~/.kaggle
-# Place your kaggle.json in ~/.kaggle/
-
-# Download NIFTY 50 minute data
+# Configure Kaggle API (Ensure kaggle.json is in ~/.kaggle/)
 python scripts/download_data.py
 ```
+*This step downloads, cleans, engineers features, and creates walk-forward splits.*
 
-### 3. Train World Model
-
+### 3. Stage 1: World Model Training
+Train the market dynamics model (Conv1D + BiLSTM) which will be used for synthetic data generation:
 ```bash
-# Stage 1: Pre-train world model
 python scripts/train_world_model.py --config config/config.yaml
 ```
 
-### 4. Train Meta-RL Policy
-
+### 4. Stages 2-5: Meta-RL Training Pipeline
+Train the trading policy through offline simulation and online fine-tuning:
 ```bash
-# Stages 2-5: Meta-RL training pipeline
-python scripts/train_meta_rl.py --config config/config.yaml
+# Start from Stage 2 (Offline Meta-RL)
+python scripts/train_meta_rl.py --stage 2
+
+# To resume at a later stage (e.g., Stage 4: Risk-aware training)
+python scripts/train_meta_rl.py --stage 4 --resume models/checkpoints/meta_rl/stage3_policy.zip
 ```
 
-### 5. Evaluate
-
+### 5. Stage 6: Evaluation & Walk-Forward Validation
+Evaluate the final policy's performance across multiple time windows:
 ```bash
-# Stage 6: Walk-forward validation
+# Standard evaluation
 python scripts/evaluate.py --config config/config.yaml
+
+# Full walk-forward validation with regime attribution
+python scripts/evaluate.py --walk_forward
 ```
+
+### 6. Stage 7: Production & Continual Learning
+Run the model in production mode or perform continual adaptation:
+```bash
+# Start the FastAPI Model Server
+python src/api/server.py
+
+# Run a continual training cycle based on recent market volatility
+python scripts/train_continual.py
+```
+
 
 ## 📊 Training Pipeline (6 Stages)
 
