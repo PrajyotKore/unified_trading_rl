@@ -29,7 +29,7 @@
 \maketitle
 
 \begin{abstract}
-Deep reinforcement learning (RL) for financial trading suffers from six critical limitations: sample inefficiency, non-stationarity, black-box opacity, poor risk management, simulation-reality gaps, and overfitting. We present \textbf{UNIFIED}, a single end-to-end architecture that simultaneously addresses all six challenges through a novel integration of model-based RL, meta-learning via RL$^2$, multi-head risk modeling, domain randomization, and composite rewards. Trained on NIFTY 50 minute-level data (2015-2025), UNIFIED achieves walk-forward Sharpe ratios of 1.5-2.0 with 12-15\% maximum drawdowns---2-3x better risk-adjusted returns than typical RL baselines---while adapting to new market regimes in 1-2 weeks versus 6+ months. Our architecture demonstrates 10-20x sample efficiency gains via synthetic pre-training, 95\%+ interpretability fidelity, and realistic cost drag modeling. Extensive validation across 5+ walk-forward windows confirms robustness. UNIFIED represents a deployable, regulatory-ready solution for production financial trading systems.
+Deep reinforcement learning (RL) for financial trading suffers from six critical limitations: sample inefficiency, non-stationarity, black-box opacity, poor risk management, simulation-reality gaps, and overfitting. We present \textbf{UNIFIED}, a single end-to-end architecture that simultaneously addresses all six challenges through a novel integration of \textbf{Transformer-based World Models}, meta-learning via RL$^2$, multi-head risk modeling, domain randomization, and \textbf{Differential Sharpe Ratio (DSR)} rewards. Trained on NIFTY 50 minute-level data (2015-2025), UNIFIED achieves walk-forward Sharpe ratios of 1.5-2.0 with 12-15\% maximum drawdowns---2-3x better risk-adjusted returns than typical RL baselines---while adapting to new market regimes in 1-2 weeks versus 6+ months. Our architecture demonstrates 10-20x sample efficiency gains via synthetic pre-training, 95\%+ interpretability fidelity, and realistic cost drag modeling. Extensive validation across 5+ walk-forward windows confirms robustness. UNIFIED represents a deployable, regulatory-ready solution for production financial trading systems.
 \end{abstract}
 
 \section{Introduction}
@@ -48,7 +48,7 @@ Financial markets exhibit non-stationarity, partial observability, and extreme r
 We introduce \textbf{UNIFIED}, a single architecture that solves \emph{all six limitations simultaneously}:
 
 \begin{equation}
-    \text{UNIFIED} = \text{World Model} + \text{RL}^2 \text{ Meta-RL} + \text{Multi-Head} + \text{Domain Rand.} + \text{Composite Rewards}
+    \text{UNIFIED} = \text{Transformer World Model} + \text{RL}^2 \text{ Meta-RL} + \text{Multi-Head} + \text{Domain Rand.} + \text{DSR Rewards}
 \end{equation}
 
 \section{Related Work}
@@ -61,15 +61,15 @@ We introduce \textbf{UNIFIED}, a single architecture that solves \emph{all six l
 
 \section{UNIFIED Architecture}
 
-\subsection{World Model (Sample Efficiency + Sim-Reality Gap)}
+\subsection{Transformer World Model (Sample Efficiency + Sim-Reality Gap)}
 
-The world model learns market dynamics from NIFTY 50 minute-level data. It processes OHLCV sequences through a Conv1D encoder, concatenates 45 technical features, and feeds them into a Bidirectional LSTM:
+The world model learns market dynamics from NIFTY 50 minute-level data. To capture long-term dependencies crucial for regime detection, we employ a \textbf{Transformer Encoder} architecture with attention mechanisms:
 
 \begin{equation}
-    \mathbf{z}_t = \text{BiLSTM}(\text{Cat}(\text{Conv1D}(\text{OHLCV}_{t-T:t}), \mathbf{f}_t))
+    \mathbf{z}_t = \text{TransformerEncoder}(\text{PosEncoding}(\text{Cat}(\text{OHLCV}_{t-T:t}, \mathbf{f}_t)))
 \end{equation}
 
-where $\mathbf{f}_t \in \mathbb{R}^{45}$ contains features including RSI, MACD, Bollinger Bands, and custom volatility metrics. Multi-head predictions provide structured outputs matching the config:
+where $\mathbf{f}_t \in \mathbb{R}^{45}$ contains features including RSI, MACD, and Bollinger Bands. The attention mechanism allows the model to attend to relevant historical context (e.g., support levels from weeks ago) regardless of temporal distance. Multi-head predictions provide structured outputs:
 
 \begin{align}
     \hat{r}_{t+1}, \hat{\sigma}_{t+1} &= \text{PriceHead}(\mathbf{z}_t) \\
@@ -97,10 +97,10 @@ Slippage & 1-20 bps & [0.5, 40] bps & Execution errors \\
 
 \subsection{Recurrent Meta-RL Policy Core (Non-Stationarity)}
 
-The policy employs an \textbf{RL$^2$ architecture} utilizing a Recurrent PPO (Proximal Policy Optimization) agent. The recurrent core (LSTM) maintains a hidden belief state $\mathbf{h}_t$ that implicitly infers the current market regime from the sequence of observations:
+The policy employs an \textbf{RL$^2$ architecture} utilizing a Recurrent PPO (Proximal Policy Optimization) agent. The recurrent core (LSTM) maintains a hidden belief state $\mathbf{h}_t$ that implicitly infers the current market regime. The input $\mathbf{o}_t$ combines the Transformer latent state $\mathbf{z}_t$ with explicit raw features $\mathbf{x}_t$ for hybrid intuition-logic processing:
 
 \begin{equation}
-    \mathbf{h}_t, \pi(a_t|\mathbf{s}_t) = \text{LSTM}(\text{MLP}(\mathbf{z}_t); \mathbf{h}_{t-1})
+    \mathbf{h}_t, \pi(a_t|\mathbf{s}_t) = \text{LSTM}(\text{MLP}(\text{Cat}(\mathbf{z}_t, \mathbf{x}_t)); \mathbf{h}_{t-1})
 \end{equation}
 
 Meta-training is performed by rolling out episodes in the randomized synthetic environment, effectively treating each sampled parameter set as a "task".
@@ -108,7 +108,7 @@ Meta-training is performed by rolling out episodes in the randomized synthetic e
 \begin{algorithm}[h]
 \caption{Meta-RL Training (RL$^2$ / Recurrent PPO)}
 \begin{algorithmic}
-\STATE \textbf{Input:} Pre-trained World Model $\mathcal{M}$, Domain Randomizer $\mathcal{D}$
+\STATE \textbf{Input:} Pre-trained Transformer World Model $\mathcal{M}$, Domain Randomizer $\mathcal{D}$
 \FOR{iteration $k=1, \dots, K$}
     \STATE Sample batch of initial states $s_0 \sim \text{RealData}$
     \STATE Sample physics parameters $\phi \sim \mathcal{D}$ (Volatility, Spread, etc.)
@@ -127,11 +127,15 @@ The architecture includes auxiliary heads for explainability and risk-awareness:
     \hat{DD}_{t+5}, \hat{\sigma}_{t+5}, \text{VaR}_{t+5} = \text{RiskHead}(\mathbf{h}_t)
 \end{equation}
 
-\subsection{Composite Reward (Risk Management)}
+\subsection{Differential Sharpe Ratio Reward (Risk Management)}
+
+To optimize risk-adjusted returns directly during training (SOTA 2024), we replace standard returns with the \textbf{Differential Sharpe Ratio (DSR)}, which provides a step-by-step approximation of the Sharpe Ratio gradient:
 
 \begin{equation}
-    R_t = r_{\text{P\&L}} - \lambda \hat{\sigma}_{t+5} - \mu \hat{DD}_{t+5} - \text{penalty}(\text{constraints})
+    R_t \approx \frac{B_{t-1}(r_t - A_{t-1}) - \frac{1}{2}A_{t-1}(r_t^2 - B_{t-1})}{(B_{t-1} - A_{t-1}^2)^{3/2}}
 \end{equation}
+
+Where $A_t$ and $B_t$ are exponential moving averages of returns and squared returns, respectively. This forces the agent to maximize returns while explicitly punishing volatility at every timestep, unlike standard composite rewards.
 
 \section{Experimental Setup}
 

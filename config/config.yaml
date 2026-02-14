@@ -51,7 +51,7 @@ domain_randomization:
   curriculum: true  # Gradually increase randomization
   initial_range_multiplier: 1.0
   final_range_multiplier: 2.0
-  curriculum_steps: 10000
+  curriculum_steps: 100000 # Increased
   
   parameters:
     volatility:
@@ -101,15 +101,15 @@ policy:
   
   # Training (PPO)
   learning_rate: 0.0003
-  n_steps: 2048
-  batch_size: 2048
+  n_steps: 1024 # Reduced from 2048
+  batch_size: 512 # Reduced from 2048
   n_epochs: 10
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
   ent_coef: 0.01
-  vf_coef: 0.5
-  max_grad_norm: 0.5
+  vf_coef: 0.1 # Reduced for stability
+  max_grad_norm: 0.1 # Much tighter for stability
   
 # Meta-Learning (MAML)
 meta_learning:
@@ -147,11 +147,11 @@ training:
   
   # Stage 2: Offline Meta-RL
   episode_length: 100
-  stage2_timesteps: 1000  #000
+  stage2_timesteps: 10000 # Increased from 1000
   stage2_synthetic_ratio: 0.8  # 80% synthetic, 20% real
   
   # Stage 3: Online Fine-tuning
-  stage3_timesteps: 500000
+  stage3_timesteps: 50000
   
   # Stage 4: Risk-aware Multi-task
   stage4_timesteps: 300000

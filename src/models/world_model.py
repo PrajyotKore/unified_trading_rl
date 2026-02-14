@@ -316,8 +316,8 @@ class WorldModelLoss(nn.Module):
     def __init__(
         self,
         regime_weight: float = 1.0,
-        price_weight: float = 1000.0,
-        volume_weight: float = 1000.0,
+        price_weight: float = 1000000.0,
+        volume_weight: float = 100000.0,
         use_mse: bool = True
     ):
         """
@@ -450,10 +450,13 @@ class TransformerWorldModel(nn.Module):
         self.d_model = d_model
         self.lstm_hidden_size = d_model # API compatibility with TradingEnv (latent dim)
         self.bidirectional = False # Transformers are bidirectional by nature (contextual)
+        self.input_channels = input_channels
+        self.feature_dim = feature_dim
         
         # Input embedding: Project (OHLCV + Features) -> d_model
         input_dim = input_channels + feature_dim
         self.input_projection = nn.Linear(input_dim, d_model)
+        self.input_norm = nn.LayerNorm(d_model) # Stability
         
         self.pos_encoder = PositionalEncoding(d_model, max_len=sequence_length + 100)
         
@@ -485,6 +488,9 @@ class TransformerWorldModel(nn.Module):
             nn.Linear(64, num_regimes)
         )
         
+        # Stability: LayerNorm before heads to keep latent space in check
+        self.latent_norm = nn.LayerNorm(d_model)
+        
         logger.info(f"TransformerWorldModel initialized with {self._count_parameters():,} parameters")
         
     def _count_parameters(self) -> int:
@@ -511,27 +517,30 @@ class TransformerWorldModel(nn.Module):
         
         # Embed
         x = self.input_projection(x) # [batch, seq, d_model]
+        x = self.input_norm(x) # Normalize before transformer
         x = self.pos_encoder(x)
         
-        # Transform
-        # Transformer mask could be added here for causal attention if we were doing autoregressive generation.
-        # But for "understanding the window", full attention (bidirectional) is fine/better.
+        # Transform (Bidirectional)
         latent = self.transformer_encoder(x) # [batch, seq, d_model]
+        
+        # Stability: Norm and Clamp latents
+        latent = self.latent_norm(latent)
+        latent = torch.clamp(latent, -100.0, 100.0)
         
         # Heads
         price_pred = self.price_head(latent)
         volume_pred = self.volume_head(latent)
         regime_logits = self.regime_head(latent)
         
-        # Softplus for std
+        # Softplus for std + CLAMPING
         price_pred = torch.cat([
-            price_pred[..., :1],
-            nn.functional.softplus(price_pred[..., 1:]) + 1e-6
+            torch.clamp(price_pred[..., :1], -0.5, 0.5), # mean return +/- 50%
+            torch.clamp(nn.functional.softplus(price_pred[..., 1:]), 1e-6, 0.2) # std return max 20%
         ], dim=-1)
         
         volume_pred = torch.cat([
-            volume_pred[..., :1],
-            nn.functional.softplus(volume_pred[..., 1:]) + 1e-6
+            torch.clamp(volume_pred[..., :1], -10.0, 10.0),
+            torch.clamp(nn.functional.softplus(volume_pred[..., 1:]), 1e-6, 5.0)
         ], dim=-1)
         
         return {
@@ -545,3 +554,117 @@ class TransformerWorldModel(nn.Module):
     def get_latent_representation(self, ohlcv, features):
         outputs = self.forward(ohlcv, features)
         return outputs['latent']
+
+    def predict_next_step(
+        self,
+        ohlcv: torch.Tensor,
+        features: torch.Tensor,
+        hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Predict next step only (for rollout during training).
+        Matches API of WorldModel.
+        """
+        outputs = self.forward(ohlcv, features, hidden)
+        
+        # Extract last timestep predictions
+        return {
+            'latent': outputs['latent'][:, -1],  # [batch, d_model]
+            'price_pred': outputs['price_pred'][:, -1],  # [batch, 2]
+            'volume_pred': outputs['volume_pred'][:, -1],  # [batch, 2]
+            'regime_logits': outputs['regime_logits'][:, -1],  # [batch, num_regimes]
+            'hidden': None # No hidden state in Transformer
+        }
+
+    def sample_trajectory(
+        self,
+        initial_ohlcv: torch.Tensor,
+        initial_features: torch.Tensor,
+        num_steps: int,
+        randomize: bool = False,
+        noise_scale: float = 0.1
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Generate synthetic trajectory by rolling out world model auto-regressively.
+        Updates the input window at each step to provide context for the Transformer.
+        """
+        self.eval()
+        
+        trajectories = {
+            'returns': [],
+            'volatilities': [],
+            'volumes': [],
+            'regimes': []
+        }
+        
+        # Clone to avoid modifying original
+        curr_ohlcv = initial_ohlcv.clone()
+        curr_features = initial_features.clone()
+        
+        # Get last close price to reconstruct absolute prices for generic ohlcv update
+        # ohlcv is [batch, 5, seq]. Index 3 is Close.
+        # Note: Input is likely normalized. This approximates the dynamics in normalized space.
+        
+        with torch.no_grad():
+            for _ in range(num_steps):
+                # Predict next step
+                pred = self.predict_next_step(curr_ohlcv, curr_features)
+                
+                # Sample
+                return_mean, return_std = pred['price_pred'][:, 0], pred['price_pred'][:, 1]
+                volume_mean, volume_std = pred['volume_pred'][:, 0], pred['volume_pred'][:, 1]
+                
+                if randomize:
+                    return_std = return_std * (1 + noise_scale * torch.randn_like(return_std))
+                    volume_std = volume_std * (1 + noise_scale * torch.randn_like(volume_std))
+                
+                sampled_return = torch.normal(return_mean, return_std)
+                sampled_return = torch.clamp(sampled_return, -0.2, 0.2)
+                
+                sampled_volume = torch.normal(volume_mean, volume_std)
+                sampled_volume = torch.clamp(sampled_volume, -10.0, 10.0)
+                
+                regime_probs = torch.softmax(pred['regime_logits'], dim=-1)
+                
+                # Store
+                trajectories['returns'].append(sampled_return)
+                trajectories['volatilities'].append(return_std)
+                trajectories['volumes'].append(sampled_volume)
+                trajectories['regimes'].append(regime_probs)
+                
+                # UPDATE WINDOW (Auto-regression)
+                # 1. Shift window left
+                curr_ohlcv = torch.roll(curr_ohlcv, -1, dims=2)
+                curr_features = torch.roll(curr_features, -1, dims=1)
+                
+                # 2. Construct new candle (approximated in normalized space)
+                # We assume the return is added to the "Close" channel (idx 3)
+                # Ideally we'd denormalize -> update -> renormalize, but that requires dataset access.
+                # Working in normalized space: New Close ~= Old Close + Return (roughly)
+                
+                prev_close = curr_ohlcv[:, 3, -2] # The value we just shifted to -2
+                new_close = prev_close + sampled_return # Approximation
+                
+                # Update last timestep in window
+                # [batch, 5, -1]
+                # Open(0) = prev_close
+                # High(1) = new_close (flat bar)
+                # Low(2) = new_close
+                # Close(3) = new_close
+                # Volume(4) = sampled_volume
+                
+                curr_ohlcv[:, 0, -1] = prev_close
+                curr_ohlcv[:, 1, -1] = new_close
+                curr_ohlcv[:, 2, -1] = new_close
+                curr_ohlcv[:, 3, -1] = new_close
+                curr_ohlcv[:, 4, -1] = sampled_volume
+                
+                # Update features: Repeat last features (simplification)
+                # Ideally features like MA would be updated based on new price.
+                curr_features[:, -1, :] = curr_features[:, -2, :]
+        
+        # Stack
+        for key in trajectories:
+            trajectories[key] = torch.stack(trajectories[key], dim=1)
+            
+        return trajectories

@@ -38,20 +38,24 @@ def main():
     
     # Find data file
     csv_files = list(raw_data_dir.glob("*.csv"))
-    if not csv_files:
-        logger.error(f"No CSV files found in {raw_data_dir}!")
-        logger.info("Please run scripts/download_data.py first.")
+    xlsx_files = list(raw_data_dir.glob("*.xlsx"))
+    all_files = csv_files + xlsx_files
+
+    if not all_files:
+        logger.error(f"No CSV or XLSX files found in {raw_data_dir}!")
         return
     
-    # Prioritize NIFTY data
-    nifty_files = [f for f in csv_files if 'NIFTY' in f.name.upper()]
-    if nifty_files:
-        data_file = nifty_files[0]
+    # Prioritize the new NIFTY50_all.xlsx
+    nifty_all = [f for f in all_files if 'NIFTY50_ALL' in f.name.upper()]
+    if nifty_all:
+        data_file = nifty_all[0]
     else:
-        # Fallback to whatever is there (e.g. VIX if NIFTY missing)
-        # But prefer larger files as VIX might be small
-        csv_files.sort(key=lambda x: x.stat().st_size, reverse=True)
-        data_file = csv_files[0]
+        nifty_files = [f for f in all_files if 'NIFTY' in f.name.upper()]
+        if nifty_files:
+            data_file = nifty_files[0]
+        else:
+            all_files.sort(key=lambda x: x.stat().st_size, reverse=True)
+            data_file = all_files[0]
         
     logger.info(f"Using data file: {data_file.name}")
     
@@ -65,12 +69,17 @@ def main():
     
     raw_df = loader.load_raw_data()
     df = loader.preprocess(raw_df)
-    logger.info(f"✓ Data loaded: {len(df)} rows")
+    logger.info(f"✓ Data loaded: {len(df)} rows across {df['symbol'].nunique()} symbols")
     
-    # Step 2: Feature engineering
-    logger.info("\n[Step 2/4] Computing technical indicators...")
+    # Step 2: Feature engineering (Grouped by symbol)
+    logger.info("\n[Step 2/4] Computing technical indicators (Symbol-wise)...")
     feature_engineer = FeatureEngineer()
-    df = feature_engineer.compute_all_features(df)
+    
+    def process_symbol(symbol_df):
+        return feature_engineer.compute_all_features(symbol_df)
+
+    # Note: dropna is inside compute_all_features, so we apply it per-symbol
+    df = df.groupby('symbol', group_keys=False).apply(process_symbol)
     logger.info(f"✓ Computed {len(feature_engineer.get_feature_columns())} features")
     logger.info(f"✓ Rows after feature engineering: {len(df)}")
     
@@ -78,10 +87,18 @@ def main():
         logger.error("No data remaining after feature engineering! Check your indicators/data.")
         return
     
-    # Step 3: Regime labeling
+    # Step 3: Regime labeling (Grouped by symbol for features, Global for clusters)
     logger.info("\n[Step 3/4] Labeling market regimes...")
     regime_labeler = RegimeLabeler(num_regimes=config['world_model']['num_regimes'])
-    df = regime_labeler.label_regimes(df)
+    
+    # 3.1 Compute regime features symbol-wise to avoid lookahead/contaminaton
+    logger.info("Computing regime features symbol-wise...")
+    df = df.groupby('symbol', group_keys=False).apply(regime_labeler.compute_regime_features)
+    
+    # 3.2 Fit and label globally so regimes mean the same thing across all stocks
+    logger.info("Fitting global regime model...")
+    df['regime'] = regime_labeler.fit_kmeans(df)
+    df['regime_name'] = df['regime'].map(regime_labeler.regime_names)
     logger.info("✓ Regime labeling complete")
     
     # Step 4: Save processed data
@@ -91,7 +108,8 @@ def main():
     output_file = processed_data_dir / 'nifty_processed.parquet'
     loader.save_processed(df, str(output_file))
     
-    # Save train/val/test splits
+    # Save train/val/test splits (Time-based across symbols or per-symbol?)
+    # Usually we split by time for time series to avoid lookahead.
     train_df, val_df, test_df = loader.create_train_test_split(df)
     loader.save_processed(train_df, str(processed_data_dir / 'train.parquet'))
     loader.save_processed(val_df, str(processed_data_dir / 'val.parquet'))

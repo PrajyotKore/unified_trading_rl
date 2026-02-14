@@ -21,7 +21,10 @@ from utils.utils import load_config, setup_logging, get_device
 from models.meta_policy import MetaPolicy
 from environments.trading_env import TradingEnv
 from data.dataset import TimeSeriesDataset
-from models.world_model import WorldModel
+from models.world_model import WorldModel, TransformerWorldModel
+from models.meta_policy import MetaPolicy
+from environments.trading_env import TradingEnv
+from data.dataset import TimeSeriesDataset
 import torch
 
 logger = logging.getLogger('train_risk_aware')
@@ -76,17 +79,40 @@ def main():
         prediction_horizon=config['data']['prediction_horizon']
     )
     
-    wm_path = project_root / config['logging']['checkpoint_dir'] / 'world_model/best_model.pt'
-    world_model = WorldModel(
-        input_channels=5, # Standard
+    # Load World Model
+    wm_checkpoint_dir = project_root / config['logging']['checkpoint_dir'] / 'world_model'
+    wm_path = wm_checkpoint_dir / 'best_model.pt'
+    
+    if not wm_path.exists():
+        logger.warning(f"best_model.pt not found at {wm_path}. Looking for latest checkpoint...")
+        checkpoints = sorted(wm_checkpoint_dir.glob("checkpoint_*.pt"))
+        if checkpoints:
+            wm_path = checkpoints[-1] 
+            logger.info(f"Using latest checkpoint: {wm_path}")
+        else:
+             logger.error("World Model not found! Cannot train policy.")
+             return
+    
+    d_model = config['world_model'].get('d_model', 128)
+    
+    world_model = TransformerWorldModel(
+        input_channels=5,
         feature_dim=dataset[0][0]['features'].shape[1],
-        lstm_hidden_size=config['world_model']['lstm_hidden_size'],
-        lstm_num_layers=config['world_model']['lstm_num_layers'],
-        num_regimes=config['world_model']['num_regimes']
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=d_model * 4,
+        dropout=config['world_model']['dropout'],
+        num_regimes=config['world_model']['num_regimes'],
+        sequence_length=config['data']['sequence_length']
     ).to(device)
     
     checkpoint = torch.load(wm_path, map_location=device)
-    world_model.load_state_dict(checkpoint['model_state_dict'])
+    missing_keys, unexpected_keys = world_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if missing_keys:
+        logger.warning(f"Missing keys in state_dict: {missing_keys}. Using default initialization.")
+    if unexpected_keys:
+        logger.warning(f"Unexpected keys in state_dict: {unexpected_keys}.")
     world_model.eval()
     
     # Create Environment
@@ -105,12 +131,13 @@ def main():
     # Load Policy
     policy_path = project_root / args.model_input
     if not policy_path.exists():
-        logger.error(f"Input policy not found at {policy_path}. Please complete Stage 3.")
-        return
-        
-    logger.info(f"Loading policy from {policy_path}")
-    policy = MetaPolicy(env, config, device=device)
-    policy.load(str(policy_path))
+        logger.warning(f"Input policy not found at {policy_path}. Initializing new policy from scratch.")
+        # Create fresh policy
+        policy = MetaPolicy(env, config, device=device)
+    else:
+        logger.info(f"Loading policy from {policy_path}")
+        policy = MetaPolicy(env, config, device=device)
+        policy.load(str(policy_path))
     
     # Train
     steps = config['training'].get('stage4_timesteps', 100000)

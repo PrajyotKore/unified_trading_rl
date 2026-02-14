@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from utils.utils import load_config, setup_logging, get_device
 from models.meta_policy import MetaPolicy
 from environments.trading_env import TradingEnv
-from models.world_model import WorldModel
+from models.world_model import WorldModel, TransformerWorldModel
 from data.dataset import TimeSeriesDataset
 import empyrical
 
@@ -95,31 +95,46 @@ def main():
     )
     
     # Load World Model
-    wm_path = project_root / config['logging']['checkpoint_dir'] / 'world_model/best_model.pt'
+    wm_checkpoint_dir = project_root / config['logging']['checkpoint_dir'] / 'world_model'
+    wm_path = wm_checkpoint_dir / 'best_model.pt'
+    
     if not wm_path.exists():
-        # Try fallback path if checking local run
-        wm_path_alt = project_root / 'logs/world_model/checkpoints' / 'best_model.pt' # Hypothetical
-        if wm_path_alt.exists():
-             wm_path = wm_path_alt
+        logger.warning(f"best_model.pt not found at {wm_path}. Looking for latest checkpoint...")
+        checkpoints = sorted(wm_checkpoint_dir.glob("checkpoint_*.pt"))
+        if checkpoints:
+            wm_path = checkpoints[-1] 
+            logger.info(f"Using latest checkpoint: {wm_path}")
         else:
-            logger.error(f"World Model not found at {wm_path}! Cannot evaluate latent policy.")
-            return
+             logger.error("World Model not found! Cannot evaluate latent policy.")
+             return
  
     # Get dimensions from dataset
     sample_input, _ = dataset[0]
     input_channels = sample_input['ohlcv'].shape[0]
     feature_dim = sample_input['features'].shape[1]
  
-    world_model = WorldModel(
+    # Initialize TransformerWorldModel
+    logger.info("Loading Transformer World Model...")
+    d_model = config['world_model'].get('d_model', 128) 
+    
+    world_model = TransformerWorldModel(
         input_channels=input_channels,
         feature_dim=feature_dim,
-        lstm_hidden_size=config['world_model']['lstm_hidden_size'],
-        lstm_num_layers=config['world_model']['lstm_num_layers'],
-        num_regimes=config['world_model']['num_regimes']
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=d_model * 4,
+        dropout=config['world_model']['dropout'],
+        num_regimes=config['world_model']['num_regimes'],
+        sequence_length=config['data']['sequence_length']
     ).to(device)
     
     checkpoint = torch.load(wm_path, map_location=device)
-    world_model.load_state_dict(checkpoint['model_state_dict'])
+    missing_keys, unexpected_keys = world_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if missing_keys:
+        logger.warning(f"Missing keys in state_dict: {missing_keys}. Using default initialization.")
+    if unexpected_keys:
+        logger.warning(f"Unexpected keys in state_dict: {unexpected_keys}.")
     world_model.eval()
     logger.info("World Model loaded")
     

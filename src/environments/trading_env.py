@@ -96,11 +96,12 @@ class TradingEnv(gym.Env):
             # We will grab the correct feature dim from the dataset or df.
             
             # Identify feature columns count
-            exclude = ['datetime', 'date', 'regime', 'regime_name', 'open', 'high', 'low', 'close', 'volume']
+            exclude = ['datetime', 'date', 'regime', 'regime_name', 'open', 'high', 'low', 'close', 'volume', 'symbol', 'Series']
             self.feature_cols = [c for c in self.df.columns if c not in exclude]
             self.feature_dim = len(self.feature_cols)
 
-            obs_dim = latent_dim + self.feature_dim + 3
+            # Latent(128) + Features(60) + Portfolio(3) + Penalties(2) + PrevAction(1) = 194
+            obs_dim = latent_dim + self.feature_dim + 3 + 2 + 1
             self.use_latent = True
             # Ensure WM is in eval mode
             self.world_model.eval()
@@ -109,7 +110,7 @@ class TradingEnv(gym.Env):
             exclude = ['datetime', 'date', 'regime', 'regime_name']
             self.feature_cols = [c for c in self.df.columns if c not in exclude]
             self.data_matrix = self.df[self.feature_cols].values.astype(np.float32)
-            obs_dim = (len(self.feature_cols) * window_size) + 3
+            obs_dim = (len(self.feature_cols) * window_size) + 3 + 2 + 1
             self.use_latent = False
             
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
@@ -128,15 +129,18 @@ class TradingEnv(gym.Env):
         """Reset environment to initial state."""
         super().reset(seed=seed)
         
-        # Random start
-        # Leave enough data for window at start and some steps at end
-        min_step = self.window_size
-        max_step = self.max_steps - 100
-        
-        if max_step <= min_step:
-            self.current_step = min_step
+        if self.dataset is not None:
+             # Use the symbol-aware valid indices from our dataset
+             idx_into_valid = self.np_random.integers(0, len(self.dataset.valid_indices))
+             self.current_step = self.dataset.valid_indices[idx_into_valid]
         else:
-            self.current_step = self.np_random.integers(min_step, max_step)
+             # Fallback for raw dataframe
+             min_step = self.window_size
+             max_step = len(self.df) - 100
+             self.current_step = self.np_random.integers(min_step, max_step) if max_step > min_step else min_step
+        
+        # Track current symbol to avoid crossing boundaries
+        self.current_symbol = self.df.iloc[self.current_step]['symbol'] if 'symbol' in self.df.columns else 'NIFTY'
             
         self.balance = self.initial_balance
         self.position = 0.0
@@ -155,8 +159,12 @@ class TradingEnv(gym.Env):
         # Get current price data
         current_price = self.df.iloc[self.current_step]['close']
         
-        # Check bounds
+        # Check bounds and Symbol boundaries
         if self.current_step + 1 >= len(self.df):
+            return self._get_observation(), 0.0, True, False, {}
+            
+        # Ensure we don't cross into a different stock
+        if 'symbol' in self.df.columns and self.df.iloc[self.current_step + 1]['symbol'] != self.current_symbol:
             return self._get_observation(), 0.0, True, False, {}
             
         next_price = self.df.iloc[self.current_step + 1]['close']
@@ -199,36 +207,37 @@ class TradingEnv(gym.Env):
             if len(self.return_history) > 20: self.return_history.pop(0)
             volatility = np.std(self.return_history) if len(self.return_history) > 5 else 0.0
             
-            # Differential Sharpe Ratio (DSR)
-            # Update running stats
+            # Differential Sharpe Ratio (DSR) Optimization
             eta = 1/1000  # Learning rate for running stats
             
             # 1. Update A (First moment: Mean return)
             if not hasattr(self, 'running_A'): self.running_A = 0.0
-            self.running_A = (1 - eta) * self.running_A + eta * gross_return
+            delta_A = gross_return - self.running_A
+            self.running_A += eta * delta_A
             
             # 2. Update B (Second moment: Mean squared return)
-            if not hasattr(self, 'running_B'): self.running_B = 0.0
-            self.running_B = (1 - eta) * self.running_B + eta * (gross_return ** 2)
+            if not hasattr(self, 'running_B'): self.running_B = 1e-6
+            delta_B = (gross_return ** 2) - self.running_B
+            self.running_B += eta * delta_B
             
-            # 3. Compute DSR
-            # Delta_S_t ~ (R_t - A_{t-1}) / (B_{t-1} - A_{t-1}^2)^(1/2)
-            # Actually standard DSR formula derived from gradient
+            # 3. Compute DSR (Mathematical Formula from Moody & Saffell)
+            # Variance must be positive for power 1.5 (which is sqrt^3)
+            variance = max(self.running_B - (self.running_A ** 2), 1e-9)
+            denominator = variance ** 1.5
             
-            std_dev = np.sqrt(self.running_B - self.running_A**2 + 1e-6)
-            
-            if std_dev > 1e-6:
-                # D_t = (B_{t-1} * (R_t - A_{t-1}) - 0.5 * A_{t-1} * (R_t^2 - B_{t-1})) / (B_{t-1} - A_{t-1}^2)^(3/2)
-                # Simplified robust version:
-                dsr = (gross_return - self.running_A) / std_dev
+            if denominator > 1e-12:
+                dsr = (self.running_B * delta_A - 0.5 * self.running_A * delta_B) / denominator
             else:
                 dsr = 0.0
                 
             reward = dsr * self.reward_scaling
             
-            # Apply penalties (if configured)
+            # Apply penalties (Standard reinforcement)
             reward -= self.vol_penalty * volatility
             reward -= self.dd_penalty * drawdown
+            
+            # Final Reward Stability: Clip reward to avoid PPO explosion
+            reward = np.clip(reward, -10.0, 10.0)
             
             terminated = self.current_step >= self.max_steps - 1
             
@@ -296,11 +305,17 @@ class TradingEnv(gym.Env):
                 latent_vec = latent[0, -1].cpu().numpy()
             
             # Extract Raw Features for the LAST step
-            # features_t shape is [1, seq, dim]. We want normalized features at t.
-            # However features_t is tensor. We can just take the last element from numpy features array.
-            # features shape [window, dim]
             raw_features_vec = features[-1] # Normalized features at t
             
+            # Numerical Safety
+            if np.isnan(latent_vec).any() or np.isinf(latent_vec).any():
+                logger.warning(f"NaN/Inf Latent detected at step {self.current_step}. Cleaning...")
+                latent_vec = np.nan_to_num(latent_vec)
+                
+            if np.isnan(raw_features_vec).any() or np.isinf(raw_features_vec).any():
+                logger.warning(f"NaN/Inf Features detected at step {self.current_step}. Cleaning...")
+                raw_features_vec = np.nan_to_num(raw_features_vec)
+
             # Concatenate Latent + Raw Features
             obs = np.concatenate([latent_vec, raw_features_vec])
             
@@ -311,12 +326,22 @@ class TradingEnv(gym.Env):
             market_features = self.data_matrix[start:end].flatten()
             obs = market_features
             
-        # Portfolio state
-        unrealized_pnl = 0.0  # Simplification for continuous allocation
+        unrealized_pnl = 0.0
         portfolio_state = np.array([
             self.position,
             unrealized_pnl,
-            self.balance / self.initial_balance  # Normalize
+            self.balance / max(self.initial_balance, 1e-6),
+            self.vol_penalty,
+            self.dd_penalty,
+            self.transaction_cost_pct * 100 # In basis points equivalent
         ], dtype=np.float32)
         
-        return np.concatenate([obs, portfolio_state])
+        # Ensure portfolio state is clean
+        portfolio_state = np.nan_to_num(portfolio_state)
+        
+        full_obs = np.concatenate([obs, portfolio_state])
+        
+        # Final safety clip
+        full_obs = np.clip(full_obs, -1e6, 1e6)
+        
+        return full_obs

@@ -48,9 +48,18 @@ class TimeSeriesDataset(Dataset):
         
         # Identify feature columns
         if feature_columns is None:
-            # Exclude datetime, OHLCV, and regime columns
-            exclude = self.ohlcv_cols + ['datetime', 'date', 'time', 'regime', 'regime_name']
-            self.feature_cols = [col for col in self.df.columns if col not in exclude]
+            # 1. Start with everything except targets and metadata
+            exclude = self.ohlcv_cols + ['datetime', 'date', 'time', 'regime', 'regime_name', 'symbol', 'Series']
+            potential_features = [col for col in self.df.columns if col not in exclude]
+            
+            # 2. Programmatically keep only numeric columns
+            numeric_df = self.df[potential_features].select_dtypes(include=[np.number])
+            self.feature_cols = numeric_df.columns.tolist()
+            
+            # Log excluded non-numeric columns for debugging
+            non_numeric = [c for c in potential_features if c not in self.feature_cols]
+            if non_numeric:
+                logger.debug(f"Excluded non-numeric columns from features: {non_numeric}")
         else:
             self.feature_cols = feature_columns
         
@@ -75,11 +84,18 @@ class TimeSeriesDataset(Dataset):
         else:
             self.regimes = np.zeros(len(self.df), dtype=np.int64)  # default regime
         
-        # Compute returns and volume changes for targets
-        # Handle zero volume for log
-        vol_safe = np.maximum(self.df['volume'].values, 1e-8)
-        self.returns = np.diff(np.log(self.df['close'].values), prepend=0).astype(np.float32)
-        self.volume_changes = np.diff(np.log(vol_safe + 1), prepend=0).astype(np.float32)
+        # Compute returns and volume changes for targets symbol-wise to avoid jumps
+        self.returns = np.zeros(len(self.df), dtype=np.float32)
+        self.volume_changes = np.zeros(len(self.df), dtype=np.float32)
+        
+        for symbol, group in self.df.groupby('symbol'):
+            indices = group.index
+            vol_safe = np.maximum(group['volume'].values, 1e-8)
+            group_returns = np.diff(np.log(group['close'].values), prepend=np.log(group['close'].values[0])).astype(np.float32)
+            group_vol_changes = np.diff(np.log(vol_safe + 1), prepend=np.log(vol_safe[0] + 1)).astype(np.float32)
+            
+            self.returns[indices] = group_returns
+            self.volume_changes[indices] = group_vol_changes
         
         # Normalize if requested
         if normalize:
@@ -87,12 +103,19 @@ class TimeSeriesDataset(Dataset):
             self.features = self._normalize_features(self.features)
         
         # Valid indices (need sequence_length before and prediction_horizon after)
-        self.valid_indices = range(
-            sequence_length,
-            len(self.df) - prediction_horizon
-        )
+        # MUST stay within the same symbol
+        logger.info("Computing symbol-aware valid indices...")
+        symbols = self.df['symbol'].values
+        valid_indices = []
         
-        logger.info(f"Dataset loaded: {len(self.valid_indices)} valid samples")
+        for i in range(sequence_length, len(self.df) - prediction_horizon):
+            # Check if start and end of window (+ horizon) belong to same symbol
+            if symbols[i - sequence_length] == symbols[i + prediction_horizon - 1]:
+                valid_indices.append(i)
+        
+        self.valid_indices = np.array(valid_indices)
+        
+        logger.info(f"Dataset loaded: {len(self.valid_indices)} valid samples (symbol-aware)")
     
     def _compute_normalization_stats(self):
         """Compute mean and std for normalization."""

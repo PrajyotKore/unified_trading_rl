@@ -68,20 +68,13 @@ class SyntheticTradingEnv(gym.Env):
         self.action_space = spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32)
         
         # Observation space:
-        # We need to expose the *latent* state of the world model to the policy?
-        # Or the *raw* observation (ohlcv window)?
-        # The World Model paper says "Policy receives latent state z_t".
-        # Let's check RecurrentPPO. It expects vector input.
-        # If we feed latent state (output of LSTM), then Policy doesn't need its own LSTM?
-        # But `MetaPolicy` uses `RecurrentPPO`.
-        # If we feed RAW observation history, Policy does the encoding.
-        # "Sample Efficiency: 10-20x via world models" usually means training inside world model.
-        # Providing world model latent state is common.
-        # Let's output `z_t` (latent) + portfolio state.
+        # Latent state (z_t) + Raw Features (f_t) + Portfolio State
         
         # We need to know latent dimension.
         lstm_out_dim = world_model.lstm_hidden_size * (2 if world_model.bidirectional else 1)
-        obs_dim = lstm_out_dim + 3  # latent + portfolio
+        
+        # Match TradingEnv: Latent + Features + Portfolio(3) + Penalties(2) + Cost(1) = 194
+        obs_dim = lstm_out_dim + self.feature_dim + 3 + 2 + 1
         
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         
@@ -112,6 +105,8 @@ class SyntheticTradingEnv(gym.Env):
         self.portfolio_value = self.initial_balance
         
         # Generate entire synthetic trajectory for this episode
+        # Use WorldModel.sample_trajectory which handles auto-regression
+        
         with torch.no_grad():
             self.world_model.eval()
             
@@ -119,59 +114,92 @@ class SyntheticTradingEnv(gym.Env):
             preds = self.world_model.predict_next_step(self.current_ohlcv, self.current_features)
             initial_latent = preds['latent'][0].cpu().numpy()
             
-            # Rollout trajectory
-            # Note: sample_trajectory returns dict of tensors [batch, steps, ...]
-            trajectory = self.world_model.sample_trajectory(
-                initial_ohlcv=self.current_ohlcv,
-                initial_features=self.current_features,
-                num_steps=self.episode_length,
-                randomize=True, # Use default noise
-                noise_scale=0.1
-            )
-            
-            # Also need latent states for each step. 
-            # sample_trajectory might not return latents by default in current impl.
-            # But let's assume valid returns/vols.
-            # We will use the *latent state* from the rollout as observation?
-            # WorldModel.sample_trajectory doesn't return latents currently.
-            # We should update WorldModel or approximating it. 
-            # For now, just using Random Walk Latents or fixing sample_trajectory is needed.
-            
-            # Actually, `sample_trajectory` updates hidden state.
-            # Let's modify manual rollout here to keep latents.
+            # We need to store latents and features for the whole episode.
+            # Since sample_trajectory doesn't return latents/features, using manual loop again here
+            # But incorporating the window update logic we added to WorldModel.
             
             self.episode_latents = []
+            self.episode_features = [] # Store features for observation
             self.episode_returns = []
             self.episode_vols = []
             
-            curr_ohlcv = self.current_ohlcv
-            curr_features = self.current_features
-            hidden = None
+            curr_ohlcv = self.current_ohlcv.clone()
+            curr_features = self.current_features.clone()
             
-            # Generating trajectory loop manually to capture latents
-            for _ in range(self.episode_length):
-                pred = self.world_model.predict_next_step(curr_ohlcv, curr_features, hidden)
+            # Generating trajectory loop
+            for i in range(self.episode_length):
+                # Predict
+                pred = self.world_model.predict_next_step(curr_ohlcv, curr_features)
                 
-                # Store latent
-                self.episode_latents.append(pred['latent'][0].cpu().numpy())
+                # Store Latent & Feature (for observation at this step)
+                lat = pred['latent'][0].cpu().numpy()
+                if np.isnan(lat).any():
+                    logger.error(f"NaN Latent detected at step {i} of reset!")
+                    lat = np.nan_to_num(lat)
+                self.episode_latents.append(lat)
+                
+                # Extract feature vector at current timestep (last in window)
+                # features: [1, seq, dim] -> take last -> [dim]
+                feat_vec = curr_features[0, -1].cpu().numpy()
+                if np.isnan(feat_vec).any():
+                    logger.error(f"NaN Feature detected at step {i} of reset!")
+                    feat_vec = np.nan_to_num(feat_vec)
+                self.episode_features.append(feat_vec)
                 
                 # Sample return
                 mu = pred['price_pred'][0, 0]
                 sigma = pred['price_pred'][0, 1]
                 
-                # Randomize sigma
+                # Randomize sigma and clip returns to prevent blowout
                 sigma = self.domain_randomizer.randomize_volatility(sigma.unsqueeze(0)).item()
                 step_ret = torch.normal(mu, sigma).item()
+                step_ret = np.clip(step_ret, -0.2, 0.2) # Clip to +/- 20% per step
+                
+                sampled_volume = torch.normal(pred['volume_pred'][0, 0], pred['volume_pred'][0, 1]).item()
+                sampled_volume = np.clip(sampled_volume, -10.0, 10.0)
                 
                 self.episode_returns.append(step_ret)
                 self.episode_vols.append(sigma)
                 
-                hidden = pred['hidden']
-                # Note: Not updating ohlcv/features realistically for next step (expensive).
-                # Using static input + hidden state evolution.
-                # This approximates "Mental Simulation" in latent space (World Models paper).
+                # UPDATE WINDOW (Auto-regression logic)
+                # 1. Shift window left
+                curr_ohlcv = torch.roll(curr_ohlcv, -1, dims=2)
+                curr_features = torch.roll(curr_features, -1, dims=1)
+                
+                # 2. Update candle (Use exponential update for log-returns)
+                prev_close = curr_ohlcv[:, 3, -2]
+                # prev_close is normalized price. step_ret is log-return.
+                new_close = prev_close * torch.exp(torch.tensor(step_ret, device=self.device, dtype=torch.float32))
+                new_close = torch.clamp(new_close, 0.1, 10.0) # Keep normalized price in [0.1x, 10x] range
+                
+                curr_ohlcv[:, 0, -1] = prev_close
+                curr_ohlcv[:, 1, -1] = new_close
+                curr_ohlcv[:, 2, -1] = new_close
+                curr_ohlcv[:, 3, -1] = new_close
+                curr_ohlcv[:, 4, -1] = sampled_volume
+                
+                # Check for NaNs immediately to prevent loop corruption
+                if torch.isnan(curr_ohlcv).any():
+                    logger.error(f"NaN detected in OHLCV window at step {i}! Aborting simulation loop.")
+                    # Fill rest with last good values to prevent policy crash
+                    for j in range(i, self.episode_length):
+                         self.episode_returns.append(0.0)
+                         self.episode_vols.append(0.01)
+                         self.episode_latents.append(self.episode_latents[-1] if self.episode_latents else np.zeros(self.feature_dim))
+                         self.episode_features.append(self.episode_features[-1] if self.episode_features else np.zeros(self.feature_dim))
+                    break
+                
+                # Safety: Clip OHLCV values to prevent exponential explosion in training
+                curr_ohlcv = torch.clamp(curr_ohlcv, -100.0, 100.0)
+                
+                # 3. Update features (Repeat last)
+                curr_features[:, -1, :] = curr_features[:, -2, :]
         
-        return self._get_observation(self.episode_latents[0]), {}
+        # Placeholder for penalties in synthetic (could randomize them if wanted)
+        self.vol_penalty = 0.1
+        self.dd_penalty = 0.5
+        
+        return self._get_observation(self.episode_latents[0], self.episode_features[0]), {}
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
         """Execute step in simulator."""
@@ -181,7 +209,7 @@ class SyntheticTradingEnv(gym.Env):
         # Note: current_step index corresponds to action at t, leading to return at t+1
         if self.current_step >= len(self.episode_returns):
             # Safe catch
-            return self._get_observation(self.episode_latents[-1]), 0.0, True, False, {}
+            return self._get_observation(self.episode_latents[-1], self.episode_features[-1]), 0.0, True, False, {}
             
         step_return = self.episode_returns[self.current_step]
         vol = self.episode_vols[self.current_step]
@@ -193,9 +221,9 @@ class SyntheticTradingEnv(gym.Env):
         # Using domain randomizer logic manually
         # cost ~ impact * sqrt(change) * vol + spread * change
         # Simplified:
-        ret_tensor = torch.tensor([step_return], device=self.device)
-        pos_change_tensor = torch.tensor([position_change], device=self.device)
-        vol_tensor = torch.tensor([vol], device=self.device)
+        ret_tensor = torch.tensor([step_return], device=self.device, dtype=torch.float32)
+        pos_change_tensor = torch.tensor([position_change], device=self.device, dtype=torch.float32)
+        vol_tensor = torch.tensor([vol], device=self.device, dtype=torch.float32)
         
         net_return = self.domain_randomizer.apply_randomized_costs(
             ret_tensor, pos_change_tensor, vol_tensor
@@ -206,6 +234,11 @@ class SyntheticTradingEnv(gym.Env):
         gross_return = self.position * net_return
         prev_value = self.portfolio_value
         self.portfolio_value *= (1 + gross_return)
+        
+        # Update balance (assuming cash for costs etc)
+        cost_abs = abs(position_change) * self.transaction_cost_pct * self.portfolio_value
+        self.balance -= cost_abs
+        
         self.position = target_position
         
         # Increment curriculum
@@ -219,7 +252,9 @@ class SyntheticTradingEnv(gym.Env):
             reward = -10.0  # Bankruptcy penalty
             terminated = True
         else:
-            reward = np.log(self.portfolio_value / prev_value) * self.reward_scaling
+            # Clip ratio to avoid log(inf) or log(0)
+            ratio = np.clip(self.portfolio_value / prev_value, 0.01, 100.0)
+            reward = np.log(ratio) * self.reward_scaling
         
         # Next State
         self.current_step += 1
@@ -228,8 +263,9 @@ class SyntheticTradingEnv(gym.Env):
         if not terminated:
             terminated = self.current_step >= self.episode_length
         # Use next latent state if available, else last
-        next_latent_idx = min(self.current_step, len(self.episode_latents) - 1)
-        next_latent = self.episode_latents[next_latent_idx]
+        next_idx = min(self.current_step, len(self.episode_latents) - 1)
+        next_latent = self.episode_latents[next_idx]
+        next_feature = self.episode_features[next_idx]
         
         info = {
             'portfolio_value': self.portfolio_value,
@@ -237,13 +273,25 @@ class SyntheticTradingEnv(gym.Env):
             'position': self.position
         }
         
-        return self._get_observation(next_latent), reward, terminated, False, info
+        return self._get_observation(next_latent, next_feature), reward, terminated, False, info
 
-    def _get_observation(self, latent: np.ndarray) -> np.ndarray:
+    def _get_observation(self, latent: np.ndarray, feature: np.ndarray) -> np.ndarray:
         unrealized_pnl = 0.0
         portfolio_state = np.array([
             self.position,
             unrealized_pnl,
-            self.balance / self.initial_balance
+            self.balance / max(self.initial_balance, 1e-6),
+            self.vol_penalty,
+            self.dd_penalty,
+            self.transaction_cost_pct * 100.0 # to pct
         ], dtype=np.float32)
-        return np.concatenate([latent, portfolio_state])
+        
+        obs = np.concatenate([latent, feature, portfolio_state])
+        if np.isnan(obs).any():
+             logger.error(f"NaN Observation! Latent: {np.isnan(latent).any()}, Feature: {np.isnan(feature).any()}, Port: {np.isnan(portfolio_state).any()}")
+             obs = np.nan_to_num(obs)
+        
+        # Final safety check: Clip observations to reasonable range for policy stability
+        obs = np.clip(obs, -1e6, 1e6)
+             
+        return obs

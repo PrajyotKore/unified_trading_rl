@@ -50,6 +50,8 @@ class DataLoader:
             df = pd.read_csv(self.data_path)
         elif self.data_path.endswith('.parquet'):
             df = pd.read_parquet(self.data_path)
+        elif self.data_path.endswith('.xlsx'):
+            df = pd.read_excel(self.data_path)
         else:
             raise ValueError(f"Unsupported file format: {self.data_path}")
         
@@ -71,7 +73,7 @@ class DataLoader:
         """
         logger.info("Preprocessing data...")
         
-        # Standardize column names (handle different naming conventions)
+        # Standardize column names
         column_mapping = {
             'Date': 'date',
             'Time': 'time',
@@ -80,31 +82,40 @@ class DataLoader:
             'Low': 'low',
             'Close': 'close',
             'Volume': 'volume',
-            'OPEN': 'open',
-            'HIGH': 'high',
-            'LOW': 'low',
-            'CLOSE': 'close',
-            'VOLUME': 'volume'
+            'Symbol': 'symbol'
         }
         df = df.rename(columns=column_mapping)
         
-        # Ensure we have OHLCV columns
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")
-        
-        # Parse datetime
-        if 'date' in df.columns and 'time' in df.columns:
-            df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str))
-        elif 'date' in df.columns:
-            df['datetime'] = pd.to_datetime(df['date'])
+        # Ensure we have datetime
+        if 'date' in df.columns:
+            if 'time' in df.columns:
+                df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str))
+            else:
+                df['datetime'] = pd.to_datetime(df['date'])
         elif 'datetime' in df.columns:
             df['datetime'] = pd.to_datetime(df['datetime'])
         else:
-            raise ValueError("No datetime column found")
+            # Try to find a date-like column
+            date_cols = [c for c in df.columns if 'date' in c.lower() or 'time' in c.lower()]
+            if date_cols:
+                df['datetime'] = pd.to_datetime(df[date_cols[0]])
+            else:
+                raise ValueError("No datetime column found")
+
+        # Required columns
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        # If any missing, check for case-insensitive matches
+        for req in required_cols:
+            if req not in df.columns:
+                matches = [c for c in df.columns if c.lower() == req]
+                if matches:
+                    df = df.rename(columns={matches[0]: req})
         
-        df = df.sort_values('datetime').reset_index(drop=True)
+        # Symbol handling
+        if 'symbol' not in df.columns:
+            df['symbol'] = 'NIFTY'
+            
+        df = df.sort_values(['symbol', 'datetime']).reset_index(drop=True)
         
         # Handle missing values
         logger.info(f"Missing values before cleaning:\n{df[required_cols].isnull().sum()}")
@@ -115,11 +126,15 @@ class DataLoader:
         # Drop remaining NaNs
         df = df.dropna(subset=required_cols)
         
-        # Remove outliers (3-sigma rule on returns)
-        df['returns'] = df['close'].pct_change()
-        mean_ret = df['returns'].mean()
-        std_ret = df['returns'].std()
-        df = df[np.abs(df['returns'] - mean_ret) < 3 * std_ret]
+        # Remove outliers (3-sigma rule on returns) symbol-wise to avoid cross-stock returns
+        def remove_outliers(symbol_df):
+            symbol_df = symbol_df.copy()
+            rets = symbol_df['close'].pct_change().fillna(0)
+            mean_ret = rets.mean()
+            std_ret = rets.std()
+            return symbol_df[np.abs(rets - mean_ret) < 3 * std_ret]
+
+        df = df.groupby('symbol', group_keys=False).apply(remove_outliers)
         
         # Ensure positive prices and volumes
         df = df[(df[['open', 'high', 'low', 'close']] > 0).all(axis=1)]
